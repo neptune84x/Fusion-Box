@@ -3,7 +3,7 @@ name: Build macOS Universal Binaries
 on:
   workflow_dispatch:
   schedule:
-    # Her gün gece 02:00 UTC'de çalışır — yeni sürüm kontrolü için
+    # Her gün gece 02:00 UTC'de çalışır
     - cron: '0 2 * * *'
 
 permissions:
@@ -15,172 +15,169 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # ────────────────────────────────────────────────
-      # 1. FFMPEG & FFPROBE — static release'leri çek
-      # ────────────────────────────────────────────────
-      - name: Get latest FFmpeg static build versions
-        id: ffmpeg_versions
+      # ──────────────────────────────────────────────────────────────────
+      # 1. FFmpeg & FFprobe — iki ayrı kaynaktan indir
+      #
+      #   x86_64 (Intel)   → evermeet.cx  (sadece Intel, ZIP)
+      #   arm64  (Silicon)  → ffmpeg.martin-riedl.de  (arm64, ZIP)
+      #
+      #   Her iki kaynak da doğrulanmış çalışan permalink URL'lere sahip.
+      # ──────────────────────────────────────────────────────────────────
+      - name: Download FFmpeg & FFprobe (x86_64 + arm64)
         run: |
-          # evermeet.cx — macOS için en güvenilir static build kaynağı
-          ARM_URL=$(curl -fsSL "https://evermeet.cx/ffmpeg/info/ffmpeg/release" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['download']['zip']['url'])")
-          X86_URL=$(curl -fsSL "https://evermeet.cx/ffmpeg/info/ffmpeg/release" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['download']['zip']['url'])")
+          set -euo pipefail
+          mkdir -p binaries/x86_64 binaries/arm64
 
-          # evermeet ayrı arch build sunmaz; resmi static build sitesini kullan
-          # ARM64 (Apple Silicon)
-          FFMPEG_ARM_URL="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-          FFPROBE_ARM_URL="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+          # ── x86_64: evermeet.cx ───────────────────────────────────────
+          # https://evermeet.cx/ffmpeg/#api — getrelease endpoint
+          echo "Downloading ffmpeg x86_64 (evermeet.cx)..."
+          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" \
+               -o /tmp/ffmpeg_x86.zip
+          echo "Downloading ffprobe x86_64 (evermeet.cx)..."
+          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" \
+               -o /tmp/ffprobe_x86.zip
 
-          # x86_64 (Intel) — osxexperts.net / johnvansickle alternatif yok,
-          # evermeet hem arm hem x86 build sağlar (ayrı dosyalar)
-          # Sürüm numarasını al
-          VERSION=$(curl -fsSL "https://evermeet.cx/ffmpeg/info/ffmpeg/release" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
-          echo "ffmpeg_version=$VERSION" >> "$GITHUB_OUTPUT"
+          unzip -oq /tmp/ffmpeg_x86.zip  -d /tmp/ffmpeg_x86_dir
+          unzip -oq /tmp/ffprobe_x86.zip -d /tmp/ffprobe_x86_dir
 
-          echo "ffmpeg_arm_url=$FFMPEG_ARM_URL" >> "$GITHUB_OUTPUT"
-          echo "ffprobe_arm_url=$FFPROBE_ARM_URL" >> "$GITHUB_OUTPUT"
+          cp /tmp/ffmpeg_x86_dir/ffmpeg   binaries/x86_64/ffmpeg
+          cp /tmp/ffprobe_x86_dir/ffprobe binaries/x86_64/ffprobe
 
-      - name: Download FFmpeg & FFprobe (arm64 + x86_64)
-        run: |
-          mkdir -p binaries/arm64 binaries/x86_64
+          # ── arm64: ffmpeg.martin-riedl.de ────────────────────────────
+          # https://ffmpeg.martin-riedl.de/ — permalink format:
+          # /redirect/latest/macos/arm64/release/<binary>.zip
+          echo "Downloading ffmpeg arm64 (martin-riedl.de)..."
+          curl -fsSL "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" \
+               -o /tmp/ffmpeg_arm.zip
+          echo "Downloading ffprobe arm64 (martin-riedl.de)..."
+          curl -fsSL "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip" \
+               -o /tmp/ffprobe_arm.zip
 
-          # ── arm64 (Apple Silicon) ──────────────────────────────────────
-          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"  -o /tmp/ffmpeg_arm.zip
-          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe_arm.zip
-          unzip -o /tmp/ffmpeg_arm.zip  -d /tmp/ffmpeg_arm
-          unzip -o /tmp/ffprobe_arm.zip -d /tmp/ffprobe_arm
-          cp /tmp/ffmpeg_arm/ffmpeg   binaries/arm64/ffmpeg
-          cp /tmp/ffprobe_arm/ffprobe binaries/arm64/ffprobe
+          unzip -oq /tmp/ffmpeg_arm.zip  -d /tmp/ffmpeg_arm_dir
+          unzip -oq /tmp/ffprobe_arm.zip -d /tmp/ffprobe_arm_dir
 
-          # ── x86_64 (Intel) ────────────────────────────────────────────
-          # evermeet.cx aynı binary'yi yayınlıyor; x86 için osxexperts.net kullanıyoruz
-          X86_PAGE=$(curl -fsSL "https://www.osxexperts.net/" | grep -oE 'href="[^"]+ffmpeg[^"]+x86[^"]+\.zip"' | head -1 | grep -oE 'https?://[^"]+' || true)
+          # martin-riedl ZIP içinde binary doğrudan veya alt klasörde olabilir
+          FFMPEG_ARM=$(find /tmp/ffmpeg_arm_dir  -maxdepth 2 -type f -name "ffmpeg"  | head -1)
+          FFPROBE_ARM=$(find /tmp/ffprobe_arm_dir -maxdepth 2 -type f -name "ffprobe" | head -1)
 
-          if [ -z "$X86_PAGE" ]; then
-            # Fallback: evermeet tek-arch build sağlıyorsa lipo adımında hata alırız;
-            # bu durumda resmi ffmpeg.org nightly static'i dene
-            echo "x86 URL bulunamadı, fallback kullanılıyor"
-            curl -fsSL "https://ffmpeg.martin-riedl.de/redirect/latest/macos_intel/release/ffmpeg.zip" -o /tmp/ffmpeg_x86.zip
-            curl -fsSL "https://ffmpeg.martin-riedl.de/redirect/latest/macos_intel/release/ffprobe.zip" -o /tmp/ffprobe_x86.zip
-          else
-            curl -fsSL "$X86_PAGE" -o /tmp/ffmpeg_x86.zip
-            # ffprobe için benzer
-            X86_PROBE=$(curl -fsSL "https://www.osxexperts.net/" | grep -oE 'href="[^"]+ffprobe[^"]+x86[^"]+\.zip"' | head -1 | grep -oE 'https?://[^"]+' || true)
-            curl -fsSL "$X86_PROBE" -o /tmp/ffprobe_x86.zip
+          if [ -z "$FFMPEG_ARM" ]; then
+            echo "arm64 ffmpeg binary ZIP'ten cikarilamadi!"
+            ls -laR /tmp/ffmpeg_arm_dir
+            exit 1
+          fi
+          if [ -z "$FFPROBE_ARM" ]; then
+            echo "arm64 ffprobe binary ZIP'ten cikarilamadi!"
+            ls -laR /tmp/ffprobe_arm_dir
+            exit 1
           fi
 
-          unzip -o /tmp/ffmpeg_x86.zip  -d /tmp/ffmpeg_x86
-          unzip -o /tmp/ffprobe_x86.zip -d /tmp/ffprobe_x86
-          find /tmp/ffmpeg_x86  -type f -name "ffmpeg"  | head -1 | xargs -I{} cp {} binaries/x86_64/ffmpeg
-          find /tmp/ffprobe_x86 -type f -name "ffprobe" | head -1 | xargs -I{} cp {} binaries/x86_64/ffprobe
+          cp "$FFMPEG_ARM"  binaries/arm64/ffmpeg
+          cp "$FFPROBE_ARM" binaries/arm64/ffprobe
 
-          # Arch doğrulama
-          echo "=== arm64 binaries ==="
-          file binaries/arm64/ffmpeg binaries/arm64/ffprobe
-          echo "=== x86_64 binaries ==="
+          echo ""
+          echo "=== Indirilen binary mimari bilgileri ==="
           file binaries/x86_64/ffmpeg binaries/x86_64/ffprobe
+          file binaries/arm64/ffmpeg  binaries/arm64/ffprobe
 
-      # ────────────────────────────────────────────────
-      # 2. MP4BOX — GPAC static release
-      # ────────────────────────────────────────────────
-      - name: Get latest GPAC (MP4Box) release info
-        id: gpac_info
+      # ──────────────────────────────────────────────────────────────────
+      # 2. Sürüm bilgilerini al
+      # ──────────────────────────────────────────────────────────────────
+      - name: Get version info
+        id: versions
         run: |
-          # GPAC GitHub releases'dan en son versiyonu çek
-          RELEASE_JSON=$(curl -fsSL \
-            "https://api.github.com/repos/gpac/gpac/releases/latest" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
+          set -euo pipefail
 
-          VERSION=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-          echo "gpac_version=$VERSION" >> "$GITHUB_OUTPUT"
+          FFMPEG_VER=$(curl -fsSL "https://evermeet.cx/ffmpeg/info/ffmpeg/release" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])" \
+            2>/dev/null || echo "unknown")
 
-          # arm64 asset URL
-          ARM_ASSET=$(echo "$RELEASE_JSON" | python3 -c "
-          import sys, json
-          assets = json.load(sys.stdin)['assets']
-          for a in assets:
-              n = a['name'].lower()
-              if 'mac' in n and ('arm' in n or 'silicon' in n or 'arm64' in n):
-                  print(a['browser_download_url'])
-                  break
-          ")
+          echo "ffmpeg_version=$FFMPEG_VER" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)"   >> "$GITHUB_OUTPUT"
+          echo "FFmpeg version: $FFMPEG_VER"
 
-          # x86_64 asset URL
-          X86_ASSET=$(echo "$RELEASE_JSON" | python3 -c "
-          import sys, json
-          assets = json.load(sys.stdin)['assets']
-          for a in assets:
-              n = a['name'].lower()
-              if 'mac' in n and ('x86' in n or 'intel' in n or 'amd64' in n):
-                  print(a['browser_download_url'])
-                  break
-          ")
-
-          echo "gpac_arm_url=$ARM_ASSET" >> "$GITHUB_OUTPUT"
-          echo "gpac_x86_url=$X86_ASSET" >> "$GITHUB_OUTPUT"
-          echo "GPAC version: $VERSION"
-          echo "ARM URL: $ARM_ASSET"
-          echo "x86 URL: $X86_ASSET"
-
-      - name: Download MP4Box binaries
+      # ──────────────────────────────────────────────────────────────────
+      # 3. MP4Box — GPAC nightly .pkg'den binary çıkar
+      #
+      #   GPAC macOS nightly PKG permalink:
+      #   https://download.tsi.telecom-paristech.fr/gpac/new_builds/gpac_latest_head_macos.pkg
+      #
+      #   PKG = xar arşivi; içinden Payload (cpio.gz) çıkarılır.
+      #   GPAC genellikle universal binary (arm64+x86_64) ile gelir.
+      # ──────────────────────────────────────────────────────────────────
+      - name: Download and extract MP4Box from GPAC nightly pkg
         run: |
-          ARM_URL="${{ steps.gpac_info.outputs.gpac_arm_url }}"
-          X86_URL="${{ steps.gpac_info.outputs.gpac_x86_url }}"
+          set -euo pipefail
 
-          if [ -z "$ARM_URL" ] || [ -z "$X86_URL" ]; then
-            echo "GPAC GitHub release'da hazır macOS binary bulunamadı."
-            echo "GPAC'ı kaynak koddan derliyoruz..."
+          GPAC_URL="https://download.tsi.telecom-paristech.fr/gpac/new_builds/gpac_latest_head_macos.pkg"
 
-            brew install gpac || true
-            # Homebrew arm64 binary'si
-            ARM_BIN=$(which MP4Box || brew --prefix gpac)/bin/MP4Box
-            cp "$ARM_BIN" binaries/arm64/MP4Box
+          echo "Downloading GPAC nightly pkg..."
+          curl -fsSL "$GPAC_URL" -o /tmp/gpac.pkg
 
-            # x86 için Rosetta altında derleme gerekirdi; cross-compile seçeneği:
-            echo "⚠️  x86_64 MP4Box için cross-compile adımı gerekiyor."
-            # Basit yaklaşım: arm binary'yi x86 build olarak da ekle,
-            # lipo aşamasında arch uyuşmazlığı olursa hata verir.
-            cp "$ARM_BIN" binaries/x86_64/MP4Box
-          else
-            # arm64
-            EXT_ARM="${ARM_URL##*.}"
-            curl -fsSL "$ARM_URL" -o /tmp/mp4box_arm.$EXT_ARM
-            if [ "$EXT_ARM" = "dmg" ]; then
-              hdiutil attach /tmp/mp4box_arm.dmg -mountpoint /tmp/mp4box_arm_mnt -nobrowse -quiet
-              find /tmp/mp4box_arm_mnt -name "MP4Box" | head -1 | xargs -I{} cp {} binaries/arm64/MP4Box
-              hdiutil detach /tmp/mp4box_arm_mnt -quiet
-            elif [ "$EXT_ARM" = "zip" ]; then
-              unzip -o /tmp/mp4box_arm.zip -d /tmp/mp4box_arm
-              find /tmp/mp4box_arm -name "MP4Box" | head -1 | xargs -I{} cp {} binaries/arm64/MP4Box
-            else
-              cp /tmp/mp4box_arm.$EXT_ARM binaries/arm64/MP4Box
-            fi
+          echo "Expanding pkg..."
+          pkgutil --expand /tmp/gpac.pkg /tmp/gpac_expanded
 
-            # x86_64
-            EXT_X86="${X86_URL##*.}"
-            curl -fsSL "$X86_URL" -o /tmp/mp4box_x86.$EXT_X86
-            if [ "$EXT_X86" = "dmg" ]; then
-              hdiutil attach /tmp/mp4box_x86.dmg -mountpoint /tmp/mp4box_x86_mnt -nobrowse -quiet
-              find /tmp/mp4box_x86_mnt -name "MP4Box" | head -1 | xargs -I{} cp {} binaries/x86_64/MP4Box
-              hdiutil detach /tmp/mp4box_x86_mnt -quiet
-            elif [ "$EXT_X86" = "zip" ]; then
-              unzip -o /tmp/mp4box_x86.zip -d /tmp/mp4box_x86
-              find /tmp/mp4box_x86 -name "MP4Box" | head -1 | xargs -I{} cp {} binaries/x86_64/MP4Box
-            else
-              cp /tmp/mp4box_x86.$EXT_X86 binaries/x86_64/MP4Box
-            fi
+          # Payload dosyasını bul
+          PAYLOAD=$(find /tmp/gpac_expanded -name "Payload" | head -1)
+          if [ -z "$PAYLOAD" ]; then
+            echo "Payload bulunamadi! PKG icerigi:"
+            find /tmp/gpac_expanded -type f
+            exit 1
+          fi
+          echo "Payload: $PAYLOAD"
+
+          # Payload = gzip'li cpio arşivi
+          mkdir -p /tmp/gpac_root
+          cd /tmp/gpac_root
+          cat "$PAYLOAD" | gunzip -dc | cpio -idmu 2>/dev/null || true
+
+          # MP4Box binary'yi bul
+          MP4BOX_PATH=$(find /tmp/gpac_root -name "MP4Box" -type f | head -1)
+          if [ -z "$MP4BOX_PATH" ]; then
+            echo "MP4Box binary bulunamadi! Payload icerigi:"
+            find /tmp/gpac_root -type f | head -40
+            exit 1
           fi
 
-          echo "=== MP4Box binaries ==="
-          file binaries/arm64/MP4Box binaries/x86_64/MP4Box
+          echo "MP4Box bulundu: $MP4BOX_PATH"
+          chmod +x "$MP4BOX_PATH"
+          file "$MP4BOX_PATH"
 
-      # ────────────────────────────────────────────────
-      # 3. lipo → Universal Binary oluştur
-      # ────────────────────────────────────────────────
+          MP4BOX_ARCHS=$(lipo -archs "$MP4BOX_PATH" 2>/dev/null || echo "unknown")
+          echo "MP4Box archs: $MP4BOX_ARCHS"
+
+          if [[ "$MP4BOX_ARCHS" == *"arm64"* ]] && [[ "$MP4BOX_ARCHS" == *"x86_64"* ]]; then
+            # Zaten universal — her iki klasöre kopyala (lipo adiminda slim edilecek)
+            echo "MP4Box zaten universal binary - her iki dizine kopyalaniyor"
+            cp "$MP4BOX_PATH" binaries/arm64/MP4Box
+            cp "$MP4BOX_PATH" binaries/x86_64/MP4Box
+          elif [[ "$MP4BOX_ARCHS" == *"arm64"* ]]; then
+            echo "MP4Box yalnizca arm64 - x86_64 icin brew kullanilacak"
+            cp "$MP4BOX_PATH" binaries/arm64/MP4Box
+            brew install gpac
+            cp "$(brew --prefix gpac)/bin/MP4Box" binaries/x86_64/MP4Box
+          elif [[ "$MP4BOX_ARCHS" == *"x86_64"* ]]; then
+            echo "MP4Box yalnizca x86_64 - arm64 icin brew kullanilacak"
+            cp "$MP4BOX_PATH" binaries/x86_64/MP4Box
+            brew install gpac
+            cp "$(brew --prefix gpac)/bin/MP4Box" binaries/arm64/MP4Box
+          else
+            echo "Bilinmeyen MP4Box arch: $MP4BOX_ARCHS - brew fallback"
+            brew install gpac
+            BREW_MP4BOX="$(brew --prefix gpac)/bin/MP4Box"
+            cp "$BREW_MP4BOX" binaries/arm64/MP4Box
+            cp "$BREW_MP4BOX" binaries/x86_64/MP4Box
+          fi
+
+          echo ""
+          echo "=== MP4Box binary mimari bilgileri ==="
+          file binaries/x86_64/MP4Box binaries/arm64/MP4Box
+
+      # ──────────────────────────────────────────────────────────────────
+      # 4. lipo → Universal Binary oluştur
+      # ──────────────────────────────────────────────────────────────────
       - name: Create universal binaries with lipo
         run: |
+          set -euo pipefail
           mkdir -p universal
 
           for BIN in ffmpeg ffprobe MP4Box; do
@@ -188,134 +185,142 @@ jobs:
             X86="binaries/x86_64/$BIN"
             OUT="universal/$BIN"
 
-            # Her ikisi de mevcut mu?
-            if [ ! -f "$ARM" ]; then
-              echo "❌ Eksik arm64 binary: $ARM"
-              exit 1
-            fi
-            if [ ! -f "$X86" ]; then
-              echo "❌ Eksik x86_64 binary: $X86"
-              exit 1
-            fi
+            echo ""
+            echo "== $BIN =="
 
-            # İkisi de zaten universal binary mi? (bazı dağıtımcılar öyle verir)
+            [ -f "$ARM" ] || { echo "Eksik: $ARM"; exit 1; }
+            [ -f "$X86" ] || { echo "Eksik: $X86"; exit 1; }
+
+            chmod +x "$ARM" "$X86"
+
             ARM_ARCHS=$(lipo -archs "$ARM" 2>/dev/null || echo "unknown")
             X86_ARCHS=$(lipo -archs "$X86" 2>/dev/null || echo "unknown")
+            echo "  arm binary archs : $ARM_ARCHS"
+            echo "  x86 binary archs : $X86_ARCHS"
 
+            # Her iki taraf da zaten universal ise, arm kopyasını al
             if [[ "$ARM_ARCHS" == *"arm64"* && "$ARM_ARCHS" == *"x86_64"* ]]; then
-              echo "$BIN (arm64 binary) zaten universal — kopyalanıyor"
+              echo "  -> arm binary zaten universal, direkt kullaniliyor"
               cp "$ARM" "$OUT"
+
             elif [[ "$X86_ARCHS" == *"arm64"* && "$X86_ARCHS" == *"x86_64"* ]]; then
-              echo "$BIN (x86 binary) zaten universal — kopyalanıyor"
+              echo "  -> x86 binary zaten universal, direkt kullaniliyor"
               cp "$X86" "$OUT"
+
             else
-              echo "lipo birleştiriliyor: $BIN (arm64: $ARM_ARCHS | x86_64: $X86_ARCHS)"
-              lipo -create -output "$OUT" "$ARM" "$X86"
+              # lipo gerekiyor; her binary yalnizca kendi arch'ini icermeli
+              # Fazla slice varsa thin out yap
+              LIPO_ARM="$ARM"
+              LIPO_X86="$X86"
+
+              if [[ "$ARM_ARCHS" == *"x86_64"* ]]; then
+                lipo "$ARM" -thin arm64 -output /tmp/${BIN}_arm_only
+                LIPO_ARM="/tmp/${BIN}_arm_only"
+                echo "  arm binary'den sadece arm64 slice alindi"
+              fi
+              if [[ "$X86_ARCHS" == *"arm64"* ]]; then
+                lipo "$X86" -thin x86_64 -output /tmp/${BIN}_x86_only
+                LIPO_X86="/tmp/${BIN}_x86_only"
+                echo "  x86 binary'den sadece x86_64 slice alindi"
+              fi
+
+              echo "  -> lipo ile birlestiriliyor..."
+              lipo -create -output "$OUT" "$LIPO_ARM" "$LIPO_X86"
             fi
 
             chmod +x "$OUT"
+            RESULT_ARCHS=$(lipo -archs "$OUT")
+            echo "  Sonuc archs: $RESULT_ARCHS"
 
-            echo "✅ $BIN universal archs: $(lipo -archs $OUT)"
+            if [[ "$RESULT_ARCHS" != *"arm64"* ]] || [[ "$RESULT_ARCHS" != *"x86_64"* ]]; then
+              echo "HATA: $BIN universal degil!"
+              exit 1
+            fi
+            echo "  OK: $BIN universal binary olusturuldu"
           done
 
-      # ────────────────────────────────────────────────
-      # 4. Doğrulama
-      # ────────────────────────────────────────────────
+      # ──────────────────────────────────────────────────────────────────
+      # 5. Doğrulama
+      # ──────────────────────────────────────────────────────────────────
       - name: Verify universal binaries
         run: |
-          echo "══════════════════════════════════════"
-          echo "  Universal Binary Doğrulama"
-          echo "══════════════════════════════════════"
+          echo "========================================"
+          echo "  Universal Binary Dogrulama"
+          echo "========================================"
           for BIN in ffmpeg ffprobe MP4Box; do
             echo ""
-            echo "── $BIN ──"
+            echo "-- $BIN --"
             file universal/$BIN
             lipo -info universal/$BIN
-            lipo -detailed_info universal/$BIN | grep "architecture"
           done
 
-          # Hızlı çalışma testi (native arch)
           echo ""
-          echo "── Çalışma testi ──"
-          ./universal/ffmpeg   -version 2>&1 | head -1
-          ./universal/ffprobe  -version 2>&1 | head -1
-          ./universal/MP4Box   -version 2>&1 | head -1 || true
+          echo "-- Calisma testi (native arch) --"
+          ./universal/ffmpeg  -version 2>&1 | head -1
+          ./universal/ffprobe -version 2>&1 | head -1
+          ./universal/MP4Box  -version 2>&1 | head -1 || true
 
-      # ────────────────────────────────────────────────
-      # 5. Zip'le
-      # ────────────────────────────────────────────────
+      # ──────────────────────────────────────────────────────────────────
+      # 6. Paketleme
+      # ──────────────────────────────────────────────────────────────────
       - name: Package binaries
         run: |
           cd universal
-          zip ../ffmpeg-universal-macos.zip    ffmpeg
-          zip ../ffprobe-universal-macos.zip   ffprobe
-          zip ../MP4Box-universal-macos.zip    MP4Box
-          # Hepsini bir arada içeren arşiv
+          zip ../ffmpeg-universal-macos.zip   ffmpeg
+          zip ../ffprobe-universal-macos.zip  ffprobe
+          zip ../MP4Box-universal-macos.zip   MP4Box
           zip ../media-tools-universal-macos.zip ffmpeg ffprobe MP4Box
           cd ..
 
-          echo "Paket boyutları:"
+          echo "Paket boyutlari:"
           ls -lh ffmpeg-universal-macos.zip \
                  ffprobe-universal-macos.zip \
                  MP4Box-universal-macos.zip \
                  media-tools-universal-macos.zip
 
-      # ────────────────────────────────────────────────
-      # 6. "latest" release olarak yayınla
-      # ────────────────────────────────────────────────
-      - name: Determine release tag & body
-        id: release_meta
+      # ──────────────────────────────────────────────────────────────────
+      # 7. Eski "latest" release ve tag'i temizle
+      # ──────────────────────────────────────────────────────────────────
+      - name: Delete old latest release
         run: |
-          DATE=$(date -u +"%Y%m%d")
-          FFMPEG_VER="${{ steps.ffmpeg_versions.outputs.ffmpeg_version }}"
-          GPAC_VER="${{ steps.gpac_info.outputs.gpac_version }}"
-
-          echo "tag=latest"                             >> "$GITHUB_OUTPUT"
-          echo "release_name=Latest Universal macOS Build ($DATE)" >> "$GITHUB_OUTPUT"
-
-          # Release body (çok satırlı, heredoc ile)
-          cat >> "$GITHUB_OUTPUT" << EOF
-          body<<ENDBODY
-          ## macOS Universal Binaries (arm64 + x86_64)
-
-          | Binary   | Upstream Version |
-          |----------|-----------------|
-          | ffmpeg   | $FFMPEG_VER     |
-          | ffprobe  | $FFMPEG_VER     |
-          | MP4Box   | $GPAC_VER       |
-
-          ### İndirme
-          - **media-tools-universal-macos.zip** — ffmpeg + ffprobe + MP4Box (hepsi bir arada)
-          - Ayrı ZIP'ler de mevcuttur.
-
-          ### Kullanım
-          \`\`\`bash
-          unzip media-tools-universal-macos.zip
-          chmod +x ffmpeg ffprobe MP4Box
-          ./ffmpeg -version
-          \`\`\`
-
-          > Binary'ler hem Apple Silicon (M serisi) hem Intel Mac'lerde nativee çalışır.
-          > macOS Gatekeeper uyarısı alırsanız: **Sistem Ayarları → Gizlilik ve Güvenlik → Yine de İzin Ver**
-          ENDBODY
-          EOF
-
-      - name: Delete existing "latest" release (if any)
-        run: |
-          # Varsa eski "latest" release'i sil — softprops/action-gh-release
-          # allowUpdates=true ile bunu otomatik yapabilir ama etiket çakışmasını
-          # önlemek için önce sil.
           gh release delete latest --yes 2>/dev/null || true
           git push origin :refs/tags/latest 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish "latest" release
+      # ──────────────────────────────────────────────────────────────────
+      # 8. Yeni "latest" release yayınla
+      # ──────────────────────────────────────────────────────────────────
+      - name: Publish latest release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: ${{ steps.release_meta.outputs.release_name }}
-          body: ${{ steps.release_meta.outputs.body }}
+          name: "Latest macOS Universal Build (${{ steps.versions.outputs.date }})"
+          body: |
+            ## macOS Universal Binaries — arm64 (Apple Silicon) + x86_64 (Intel)
+
+            | Binary  | Sürüm                                        |
+            |---------|----------------------------------------------|
+            | ffmpeg  | ${{ steps.versions.outputs.ffmpeg_version }} |
+            | ffprobe | ${{ steps.versions.outputs.ffmpeg_version }} |
+            | MP4Box  | GPAC nightly                                 |
+
+            **Kaynaklar:**
+            - ffmpeg/ffprobe x86_64 → [evermeet.cx](https://evermeet.cx/ffmpeg/)
+            - ffmpeg/ffprobe arm64  → [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de/)
+            - MP4Box               → [GPAC nightly](https://gpac.io/downloads/gpac-nightly-builds/)
+
+            ### Hızlı kurulum
+            ```bash
+            curl -Lo tools.zip \
+              https://github.com/${{ github.repository }}/releases/download/latest/media-tools-universal-macos.zip
+            unzip tools.zip
+            chmod +x ffmpeg ffprobe MP4Box
+            xattr -dr com.apple.quarantine ffmpeg ffprobe MP4Box
+            ./ffmpeg -version
+            ```
+
+            > Binary'ler hem Apple Silicon (M1/M2/M3/M4) hem Intel Mac'lerde native çalışır.
           prerelease: false
           make_latest: true
           files: |
