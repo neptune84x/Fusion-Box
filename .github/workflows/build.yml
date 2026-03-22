@@ -12,16 +12,15 @@ permissions:
 # AÇIKLAMA
 # ══════════════════════════════════════════════════════════════════════
 # Job 1 — build-arch (matrix: arm64 + x86_64)
-#   Her iki runner'da paralel çalışır:
-#   • macos-latest  = arm64  (Apple Silicon)
-#   • macos-13      = x86_64 (Intel)
+#   macos-latest    → arm64  (Apple Silicon, M serisi)
+#   macos-15-intel  → x86_64 (Intel, macos-13 kaldırıldı Ara 2025)
 #
-#   FFmpeg/FFprobe: hazır static binary indirilir (arch'a göre farklı kaynak)
-#   MP4Box        : GPAC kaynak kodundan --static-mp4box ile derlenir
-#                   → libgpac bağımlılığı yoktur, tek başına çalışır
+#   FFmpeg/FFprobe : hazır static binary (arch'a göre farklı kaynak)
+#   MP4Box         : GPAC kaynak kodundan --static-mp4box ile derlenir
+#                    → libgpac.dylib bağımlılığı yok, portable binary
 #
 # Job 2 — create-universal
-#   Her iki arch'ın artifact'larını alır, lipo ile birleştirir, release yayınlar.
+#   İki artifact'ı alır, lipo ile universal binary oluşturur, release yayınlar.
 # ══════════════════════════════════════════════════════════════════════
 
 jobs:
@@ -36,9 +35,9 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-latest   # Apple Silicon (M serisi)
+            runner: macos-latest    # Apple Silicon (M serisi)
           - arch: x86_64
-            runner: macos-13       # Intel
+            runner: macos-15-intel  # Intel — macos-13 kaldırıldı, yeni label bu
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -51,12 +50,12 @@ jobs:
           set -euo pipefail
 
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            # arm64: ffmpeg.martin-riedl.de
+            # arm64: ffmpeg.martin-riedl.de (doğrulanmış permalink)
             BASE="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release"
             curl -fsSL "$BASE/ffmpeg.zip"  -o /tmp/ffmpeg.zip
             curl -fsSL "$BASE/ffprobe.zip" -o /tmp/ffprobe.zip
           else
-            # x86_64: evermeet.cx (Intel only static build)
+            # x86_64: evermeet.cx (Intel only static build, doğrulanmış)
             curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"  -o /tmp/ffmpeg.zip
             curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
           fi
@@ -78,32 +77,46 @@ jobs:
           echo "ffprobe arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffprobe)"
 
       # ── MP4Box: kaynak koddan static derleme ─────────────────────
-      # --static-mp4box: libgpac'ı binary içine gömer, dış .dylib gerekmez
+      # --static-mp4box: libgpac'ı binary içine gömer
+      # Sonuç: dış .dylib bağımlılığı olmayan taşınabilir binary
+      - name: Install MP4Box build dependencies
+        run: |
+          set -euo pipefail
+          brew install cmake pkg-config
+
       - name: Build MP4Box from source (static)
         run: |
           set -euo pipefail
 
-          echo "=== GPAC kaynak kodunu klonla ==="
+          echo "=== GPAC klonlanıyor ==="
           git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac
           cd /tmp/gpac
 
-          echo "=== Configure (static-mp4box) ==="
-          ./configure --static-mp4box --use-zlib=no 2>&1 | tail -20
+          echo "=== Configure ==="
+          # --static-mp4box: libgpac statik olarak MP4Box binary'ye gömülür
+          # --use-zlib=no: macOS system zlib ile conflict önlenir
+          ./configure \
+            --static-mp4box \
+            --use-zlib=no \
+            2>&1 | tail -30
 
           echo "=== Derleme ==="
-          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -30
+          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -40
 
           MP4BOX_BIN="bin/gcc/MP4Box"
-          [ -f "$MP4BOX_BIN" ] || { echo "MP4Box derleme basarisiz!"; ls -la bin/gcc/; exit 1; }
+          [ -f "$MP4BOX_BIN" ] || { echo "MP4Box derleme basarisiz!"; ls -la bin/gcc/ 2>/dev/null || ls -la bin/; exit 1; }
 
           chmod +x "$MP4BOX_BIN"
           cp "$MP4BOX_BIN" "$GITHUB_WORKSPACE/out/MP4Box"
 
-          echo "MP4Box arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
-          echo "Dinamik bagimlilik kontrolu:"
-          otool -L "$GITHUB_WORKSPACE/out/MP4Box" | grep -v "^$GITHUB_WORKSPACE/out/MP4Box" || true
+          echo ""
+          echo "=== MP4Box kontrol ==="
+          echo "Arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
+          echo "Dinamik bagimliliklar:"
+          # Yalnizca system library'lere bagimli olmali (/usr/lib, /System)
+          otool -L "$GITHUB_WORKSPACE/out/MP4Box" | grep -v "^$GITHUB_WORKSPACE"
 
-      # ── Doğrulama ────────────────────────────────────────────────
+      # ── Doğrulama & çalışma testi ─────────────────────────────────
       - name: Verify binaries
         run: |
           echo "=== ${{ matrix.arch }} binary kontrolu ==="
@@ -112,12 +125,11 @@ jobs:
             echo "-- $BIN --"
             file "$GITHUB_WORKSPACE/out/$BIN"
             lipo -archs "$GITHUB_WORKSPACE/out/$BIN"
-            # Calisma testi
             "$GITHUB_WORKSPACE/out/$BIN" -version 2>&1 | head -1 || true
           done
 
       # ── Artifact olarak yükle ─────────────────────────────────────
-      - name: Upload arch artifact
+      - name: Upload artifact (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.arch }}
@@ -176,7 +188,7 @@ jobs:
             echo "  arm binary archs : $ARM_ARCHS"
             echo "  x86 binary archs : $X86_ARCHS"
 
-            # Eğer biri zaten universal ise doğrudan kullan
+            # Zaten universal ise doğrudan kullan
             if [[ "$ARM_ARCHS" == *"arm64"* && "$ARM_ARCHS" == *"x86_64"* ]]; then
               echo "  -> arm binary zaten universal"
               cp "$ARM" "$OUT"
@@ -184,7 +196,7 @@ jobs:
               echo "  -> x86 binary zaten universal"
               cp "$X86" "$OUT"
             else
-              # lipo: her binary yalnızca kendi arch'ını içermeli
+              # Her binary sadece kendi arch'ını içermeli — fazla slice varsa thin et
               LIPO_ARM="$ARM"
               LIPO_X86="$X86"
 
@@ -208,6 +220,7 @@ jobs:
               echo "HATA: $BIN universal degil!"
               exit 1
             fi
+            echo "  OK"
           done
 
       # ── Doğrulama ────────────────────────────────────────────────
@@ -232,10 +245,10 @@ jobs:
       - name: Package binaries
         run: |
           cd universal
-          zip ../ffmpeg-universal-macos.zip   ffmpeg
-          zip ../ffprobe-universal-macos.zip  ffprobe
-          zip ../MP4Box-universal-macos.zip   MP4Box
-          zip ../media-tools-universal-macos.zip ffmpeg ffprobe MP4Box
+          zip ../ffmpeg-universal-macos.zip          ffmpeg
+          zip ../ffprobe-universal-macos.zip         ffprobe
+          zip ../MP4Box-universal-macos.zip          MP4Box
+          zip ../media-tools-universal-macos.zip     ffmpeg ffprobe MP4Box
           cd ..
           ls -lh *-universal-macos.zip
 
@@ -251,11 +264,11 @@ jobs:
       - name: Get version info
         id: ver
         run: |
-          FFMPEG_VER=$(./universal/ffmpeg -version 2>&1 | grep "ffmpeg version" | awk '{print $3}')
+          FFMPEG_VER=$(./universal/ffmpeg -version 2>&1 | grep "ffmpeg version" | awk '{print $3}' || echo "unknown")
           MP4BOX_VER=$(./universal/MP4Box -version 2>&1 | head -1 || echo "nightly")
-          echo "ffmpeg_ver=$FFMPEG_VER" >> "$GITHUB_OUTPUT"
-          echo "mp4box_ver=$MP4BOX_VER" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_ver=$FFMPEG_VER"        >> "$GITHUB_OUTPUT"
+          echo "mp4box_ver=$MP4BOX_VER"        >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)"       >> "$GITHUB_OUTPUT"
 
       # ── Release yayınla ───────────────────────────────────────────
       - name: Publish latest release
@@ -266,14 +279,13 @@ jobs:
           body: |
             ## macOS Universal Binaries — arm64 (Apple Silicon) + x86_64 (Intel)
 
-            | Binary  | Versiyon                           | Kaynak                         |
-            |---------|------------------------------------|--------------------------------|
-            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx / martin-riedl.de |
-            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx / martin-riedl.de |
-            | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak (static derleme)  |
+            | Binary  | Versiyon                              | Notlar                        |
+            |---------|---------------------------------------|-------------------------------|
+            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de |
+            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de |
+            | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, static derleme   |
 
-            > **MP4Box** kaynak koddan `--static-mp4box` ile derlendi.
-            > Dış kütüphane bağımlılığı yoktur, doğrudan çalışır.
+            > **MP4Box** `--static-mp4box` ile derlendi — `libgpac.dylib` bağımlılığı yoktur.
 
             ### Hızlı kurulum
             ```bash
@@ -282,7 +294,6 @@ jobs:
             unzip tools.zip -d media-tools
             cd media-tools
             chmod +x ffmpeg ffprobe MP4Box
-            # Gatekeeper karantinasını kaldır
             xattr -dr com.apple.quarantine ffmpeg ffprobe MP4Box
             ./ffmpeg -version
             ./MP4Box -version
