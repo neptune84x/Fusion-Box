@@ -17,11 +17,10 @@ permissions:
 #
 #   FFmpeg/FFprobe : hazır static binary (arch'a göre farklı kaynak)
 #   MP4Box         : GPAC kaynak kodundan derlenir.
-#                    Sorun: --static-mp4box tek başına yeterli değil,
-#                    nghttp2/curl gibi bağımlılıklar dinamik kalıyor.
-#                    Çözüm: brew'daki sorunlu paketleri configure öncesi
-#                    unlink et, configure'a --use-curl=no --use-openssl=no
-#                    --use-nghttp2=no ekle → sıfır dış bağımlılık.
+#                    --static-bin  : libgpac'ı ve modülleri binary içine gömer
+#                    --disable-ssl : openssl/nghttp2 bağımlılığını kapatır
+#                    --use-curl=no : curl bağımlılığını kapatır
+#                    curl/nghttp2/openssl brew'dan kaldırılır (autodetect engellenir)
 #
 # Job 2 — create-universal
 #   İki artifact'ı alır, lipo ile universal binary oluşturur, release yayınlar.
@@ -65,8 +64,8 @@ jobs:
           FFMPEG_BIN=$(find  /tmp/ffmpeg_dir  -maxdepth 3 -type f -name "ffmpeg"  | head -1)
           FFPROBE_BIN=$(find /tmp/ffprobe_dir -maxdepth 3 -type f -name "ffprobe" | head -1)
 
-          [ -n "$FFMPEG_BIN"  ] || { echo "ffmpeg binary bulunamadi!";  ls -laR /tmp/ffmpeg_dir;  exit 1; }
-          [ -n "$FFPROBE_BIN" ] || { echo "ffprobe binary bulunamadi!"; ls -laR /tmp/ffprobe_dir; exit 1; }
+          [ -n "$FFMPEG_BIN"  ] || { echo "ffmpeg bulunamadi!";  ls -laR /tmp/ffmpeg_dir;  exit 1; }
+          [ -n "$FFPROBE_BIN" ] || { echo "ffprobe bulunamadi!"; ls -laR /tmp/ffprobe_dir; exit 1; }
 
           chmod +x "$FFMPEG_BIN" "$FFPROBE_BIN"
           cp "$FFMPEG_BIN"  "$GITHUB_WORKSPACE/out/ffmpeg"
@@ -77,77 +76,76 @@ jobs:
 
       # ── MP4Box: sıfır dış bağımlılıklı derleme ───────────────────
       #
-      # Sorun kökü: GPAC configure scripti, brew ile kurulu nghttp2/curl/openssl
-      # bulunca bunları otomatik olarak dinamik bağlar. Binary taşınınca bu
-      # kütüphaneler hedef sistemde olmadığı için dyld hatası alınır.
+      # Sorun: GPAC configure, brew'daki curl/nghttp2/openssl'ı otomatik
+      # bulur ve dinamik olarak bağlar. Binary başka sistemde çalışmaz.
       #
       # Çözüm:
-      #   1. Sorunlu brew paketlerini configure öncesi unlink et
-      #      (header/lib dizinlerini görünmez kılar, autodetect çalışmaz)
-      #   2. --use-curl=no --use-openssl=no ile network özelliklerini kapat
-      #   3. --static-mp4box ile libgpac'ı binary içine göm
-      #   4. Derleme sonrası otool ile bağımlılık kontrolü yap
+      #   1. curl, nghttp2, openssl'ı brew'dan tamamen kaldır
+      #      (unlink yeterli değil; pkg-config hâlâ bulabiliyor)
+      #   2. --static-bin        : libgpac + modülleri binary'ye göm
+      #   3. --disable-ssl       : SSL/TLS desteğini kapat (nghttp2 de kapanır)
+      #   4. --use-curl=no       : curl desteğini kapat
+      #   5. --use-js=no         : SpiderMonkey JS (QuickJS hâlâ çalışır)
+      #   Sonuç: yalnızca /usr/lib ve /System kütüphanelerine bağımlı binary
       #
-      - name: Build MP4Box from source (zero external deps)
+      - name: Remove conflicting brew packages
+        run: |
+          # ignore-dependencies: bağımlı paketleri de kaldırmaya çalışmaz
+          brew uninstall --ignore-dependencies curl     2>/dev/null || true
+          brew uninstall --ignore-dependencies nghttp2  2>/dev/null || true
+          brew uninstall --ignore-dependencies openssl  2>/dev/null || true
+          brew uninstall --ignore-dependencies openssl@3 2>/dev/null || true
+
+          # Kaldırma başarılı mı kontrol et
+          echo "=== Kalan pkg-config paketleri ==="
+          pkg-config --list-all 2>/dev/null | grep -E "curl|nghttp2|openssl" || echo "(none — iyi)"
+
+      - name: Build MP4Box from source (static, no external deps)
         run: |
           set -euo pipefail
 
-          # ── brew paketlerini unlink (configure'un görmemesi için) ──
-          # unlink başarısız olursa (zaten yok) devam et
-          brew unlink nghttp2  2>/dev/null || true
-          brew unlink curl     2>/dev/null || true
-          brew unlink openssl  2>/dev/null || true
-          brew unlink openssl@3 2>/dev/null || true
-          brew unlink libpng   2>/dev/null || true
-          brew unlink jpeg     2>/dev/null || true
-          brew unlink libjpeg  2>/dev/null || true
-
-          # ── GPAC klonla ───────────────────────────────────────────
           git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac
           cd /tmp/gpac
 
-          # ── Configure ─────────────────────────────────────────────
-          # --static-mp4box  : libgpac'ı binary içine gömer
-          # --use-zlib=no    : zlib bağımlılığını kaldır
-          # --use-curl=no    : curl/nghttp2 bağımlılığını kaldır
-          # --use-openssl=no : openssl bağımlılığını kaldır
-          # --use-png=no     : libpng bağımlılığını kaldır
-          # --use-jpeg=no    : libjpeg bağımlılığını kaldır
+          echo "=== Configure ==="
+          # --static-bin   : --static-mp4box'ın yeni adı (eski versiyon deprecated)
+          # --disable-ssl  : openssl + nghttp2 bağımlılığını kapat
+          # --use-curl=no  : curl bağımlılığını kapat
+          # --use-js=no    : SpiderMonkey'ı kapat (QuickJS built-in kalır)
+          # --use-zlib=no  : zlib bağımlılığını kapat
           ./configure \
-            --static-mp4box \
-            --use-zlib=no \
+            --static-bin \
+            --disable-ssl \
             --use-curl=no \
-            --use-openssl=no \
-            --use-png=no \
-            --use-jpeg=no \
-            2>&1 | tail -30
+            --use-js=no \
+            --use-zlib=no \
+            2>&1 | tail -40
 
-          # Config özeti — bağımlılıkların "no" olduğunu doğrula
           echo ""
           echo "=== config.mak bağımlılık özeti ==="
-          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|CONFIG_PNG|CONFIG_JPEG|CONFIG_ZLIB)" config.mak || true
+          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|CONFIG_ZLIB|STATIC)" config.mak || true
 
-          # ── Derleme ───────────────────────────────────────────────
-          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -40
+          echo ""
+          echo "=== Derleme ==="
+          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -50
 
           MP4BOX_BIN="bin/gcc/MP4Box"
           [ -f "$MP4BOX_BIN" ] || {
-            echo "MP4Box derleme basarisiz!"
-            ls -la bin/gcc/ 2>/dev/null || ls -la bin/
+            echo "MP4Box derleme basarisiz! bin icerigi:"
+            find bin/ -type f | head -20
             exit 1
           }
 
           chmod +x "$MP4BOX_BIN"
           cp "$MP4BOX_BIN" "$GITHUB_WORKSPACE/out/MP4Box"
 
-          # ── Bağımlılık doğrulaması ─────────────────────────────────
           echo ""
           echo "=== MP4Box bağımlılıkları ==="
           otool -L "$GITHUB_WORKSPACE/out/MP4Box"
 
           echo ""
           echo "=== Yasak bağımlılık kontrolü ==="
-          # Yalnızca macOS system lib'leri kabul edilir (/usr/lib, /System)
+          # Yalnızca macOS system lib'leri kabul edilir
           FORBIDDEN=$(otool -L "$GITHUB_WORKSPACE/out/MP4Box" \
             | tail -n +2 \
             | awk '{print $1}' \
@@ -157,28 +155,24 @@ jobs:
             || true)
 
           if [ -n "$FORBIDDEN" ]; then
-            echo "HATA: Tasinabilir olmayan dinamik bagimliliklar bulundu:"
+            echo "HATA: Tasinamaz dinamik bagimliliklar:"
             echo "$FORBIDDEN"
             exit 1
           fi
-          echo "OK: Tüm bağımlılıklar system library'lerden."
-
-          echo ""
+          echo "OK: Tum bagimliliklar system library."
           echo "arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
 
-      # ── Doğrulama & çalışma testi ─────────────────────────────────
+      # ── Doğrulama ─────────────────────────────────────────────────
       - name: Verify binaries (${{ matrix.arch }})
         run: |
-          echo "=== ${{ matrix.arch }} binary kontrolü ==="
           for BIN in ffmpeg ffprobe MP4Box; do
-            echo ""
             echo "-- $BIN --"
             file "$GITHUB_WORKSPACE/out/$BIN"
             lipo -archs "$GITHUB_WORKSPACE/out/$BIN"
             "$GITHUB_WORKSPACE/out/$BIN" -version 2>&1 | head -1 || true
+            echo ""
           done
 
-      # ── Artifact yükle ────────────────────────────────────────────
       - name: Upload artifact (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
@@ -212,7 +206,6 @@ jobs:
           echo "=== arm64 ===" && file binaries/arm64/*
           echo "=== x86_64 ===" && file binaries/x86_64/*
 
-      # ── lipo ─────────────────────────────────────────────────────
       - name: Create universal binaries with lipo
         run: |
           set -euo pipefail
@@ -223,7 +216,6 @@ jobs:
             X86="binaries/x86_64/$BIN"
             OUT="universal/$BIN"
 
-            echo ""
             echo "== $BIN =="
             [ -f "$ARM" ] || { echo "Eksik: $ARM"; exit 1; }
             [ -f "$X86" ] || { echo "Eksik: $X86"; exit 1; }
@@ -257,9 +249,9 @@ jobs:
             echo "  sonuc: $RESULT"
             [[ "$RESULT" == *"arm64"* && "$RESULT" == *"x86_64"* ]] \
               || { echo "HATA: $BIN universal degil!"; exit 1; }
+            echo ""
           done
 
-      # ── Doğrulama ────────────────────────────────────────────────
       - name: Verify universal binaries
         run: |
           for BIN in ffmpeg ffprobe MP4Box; do
@@ -275,7 +267,6 @@ jobs:
           ./universal/ffprobe -version 2>&1 | head -1
           ./universal/MP4Box  -version 2>&1 | head -1 || true
 
-      # ── Paketleme ────────────────────────────────────────────────
       - name: Package binaries
         run: |
           cd universal
@@ -286,7 +277,6 @@ jobs:
           cd ..
           ls -lh *-universal-macos.zip
 
-      # ── Eski release temizle ──────────────────────────────────────
       - name: Delete old latest release
         run: |
           gh release delete latest --yes 2>/dev/null || true
@@ -294,7 +284,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Sürüm bilgisi ─────────────────────────────────────────────
       - name: Get version info
         id: ver
         run: |
@@ -304,7 +293,6 @@ jobs:
           echo "mp4box_ver=$MP4BOX_VER"  >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # ── Release yayınla ───────────────────────────────────────────
       - name: Publish latest release
         uses: softprops/action-gh-release@v2
         with:
@@ -313,13 +301,13 @@ jobs:
           body: |
             ## macOS Universal Binaries — arm64 (Apple Silicon) + x86_64 (Intel)
 
-            | Binary  | Versiyon                              | Notlar                           |
-            |---------|---------------------------------------|----------------------------------|
-            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de    |
-            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de    |
+            | Binary  | Versiyon                              | Notlar                            |
+            |---------|---------------------------------------|-----------------------------------|
+            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de     |
+            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de     |
             | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, sıfır dış bağımlılık |
 
-            > **MP4Box** `--static-mp4box --use-curl=no --use-openssl=no` ile derlendi.
+            > **MP4Box** `--static-bin --disable-ssl --use-curl=no` ile derlendi.
             > Dış `.dylib` bağımlılığı yoktur — doğrudan çalışır.
 
             ### Hızlı kurulum
