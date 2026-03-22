@@ -24,15 +24,18 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      - name: Build MP4Box (Clean Multi-Arch Build)
+      - name: Build MP4Box (Targeting 26.02.2026)
         run: |
           # GPAC kaynak kodunu indir
-          git clone --depth 1 https://github.com/gpac/gpac.git gpac_source
+          git clone https://github.com/gpac/gpac.git gpac_source
+          cd gpac_source
+          # 26 Şubat 2026 tarihindeki son commit'e geçiş yapıyoruz (Sürüm Sabitleme)
+          git checkout $(git rev-list -n 1 --before="2026-02-27" master)
+          cd ..
           
-          # 1. ARM64 DERLEMESİ (Tamamen izole klasör)
+          # 1. ARM64 DERLEMESİ (İzole klasör)
           cp -r gpac_source gpac_arm64
           cd gpac_arm64
-          # Uyarı veren --disable-opengl kaldırıldı, yerine --disable-graphics eklendi (daha kapsamlı temizlik)
           ./configure --static-bin --disable-x11 --disable-graphics --disable-ffmpeg \
             --enable-vtt --prefix=./inst \
             --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
@@ -40,7 +43,7 @@ jobs:
           cp bin/gcc/mp4box ../bin/arm64/
           cd ..
           
-          # 2. Intel (x86_64) DERLEMESİ (Tamamen izole klasör)
+          # 2. Intel (x86_64) DERLEMESİ (İzole klasör)
           cp -r gpac_source gpac_x86_64
           cd gpac_x86_64
           ./configure --static-bin --disable-x11 --disable-graphics --disable-ffmpeg \
