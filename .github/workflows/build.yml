@@ -15,15 +15,14 @@ permissions:
 #   macos-latest    → arm64  (Apple Silicon)
 #   macos-15-intel  → x86_64 (Intel)
 #
-#   FFmpeg/FFprobe : hazır static binary (arch'a göre farklı kaynak)
-#   MP4Box         : GPAC kaynak kodundan derlenir.
-#                    --static-bin  : libgpac'ı ve modülleri binary içine gömer
-#                    --disable-ssl : openssl/nghttp2 bağımlılığını kapatır
-#                    --use-curl=no : curl bağımlılığını kapatır
-#                    curl/nghttp2/openssl brew'dan kaldırılır (autodetect engellenir)
+#   FFmpeg/FFprobe : hazır static binary
+#   MP4Box         : GPAC kaynak kodundan --static-bin ile derlenir.
+#                    --static-bin = "disable all libraries not linkable
+#                    statically" → curl/nghttp2/openssl otomatik kapanır.
+#                    Ekstra --use-*=no flag'lerine gerek YOK.
 #
 # Job 2 — create-universal
-#   İki artifact'ı alır, lipo ile universal binary oluşturur, release yayınlar.
+#   lipo ile universal binary oluşturur, latest release yayınlar.
 # ══════════════════════════════════════════════════════════════════════
 
 jobs:
@@ -74,56 +73,42 @@ jobs:
           echo "ffmpeg  arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffmpeg)"
           echo "ffprobe arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffprobe)"
 
-      # ── MP4Box: sıfır dış bağımlılıklı derleme ───────────────────
+      # ── MP4Box: --static-bin ile kaynak derleme ───────────────────
       #
-      # Sorun: GPAC configure, brew'daki curl/nghttp2/openssl'ı otomatik
-      # bulur ve dinamik olarak bağlar. Binary başka sistemde çalışmaz.
+      # --static-bin dokümantasyonu:
+      #   "enable static linking of MP4Box and gpac only
+      #    (will enable --static-build),
+      #    disable all libraries not linkable statically."
       #
-      # Çözüm:
-      #   1. curl, nghttp2, openssl'ı brew'dan tamamen kaldır
-      #      (unlink yeterli değil; pkg-config hâlâ bulabiliyor)
-      #   2. --static-bin        : libgpac + modülleri binary'ye göm
-      #   3. --disable-ssl       : SSL/TLS desteğini kapat (nghttp2 de kapanır)
-      #   4. --use-curl=no       : curl desteğini kapat
-      #   5. --use-js=no         : SpiderMonkey JS (QuickJS hâlâ çalışır)
-      #   Sonuç: yalnızca /usr/lib ve /System kütüphanelerine bağımlı binary
+      # Yani curl, nghttp2, openssl gibi dinamik-only kütüphaneler
+      # GPAC'ın kendi configure'u tarafından otomatik devre dışı bırakılır.
+      # Ekstra --use-*=no flag'i GEREKMEZ ve hata verir.
       #
-      - name: Remove conflicting brew packages
+      # Ek olarak brew'daki curl/openssl/nghttp2'yi uninstall ediyoruz;
+      # configure autodetect sırasında yanlış static lib bulmasın diye.
+      #
+      - name: Remove brew packages that could cause dynamic linking
         run: |
-          # ignore-dependencies: bağımlı paketleri de kaldırmaya çalışmaz
-          brew uninstall --ignore-dependencies curl     2>/dev/null || true
           brew uninstall --ignore-dependencies nghttp2  2>/dev/null || true
           brew uninstall --ignore-dependencies openssl  2>/dev/null || true
           brew uninstall --ignore-dependencies openssl@3 2>/dev/null || true
+          # curl'ü kaldırma — sistem curl'ü bozabilir; sadece unlink yeterli
+          brew unlink curl 2>/dev/null || true
 
-          # Kaldırma başarılı mı kontrol et
-          echo "=== Kalan pkg-config paketleri ==="
-          pkg-config --list-all 2>/dev/null | grep -E "curl|nghttp2|openssl" || echo "(none — iyi)"
-
-      - name: Build MP4Box from source (static, no external deps)
+      - name: Build MP4Box from source (static-bin)
         run: |
           set -euo pipefail
 
           git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac
           cd /tmp/gpac
 
-          echo "=== Configure ==="
-          # --static-bin   : --static-mp4box'ın yeni adı (eski versiyon deprecated)
-          # --disable-ssl  : openssl + nghttp2 bağımlılığını kapat
-          # --use-curl=no  : curl bağımlılığını kapat
-          # --use-js=no    : SpiderMonkey'ı kapat (QuickJS built-in kalır)
-          # --use-zlib=no  : zlib bağımlılığını kapat
-          ./configure \
-            --static-bin \
-            --disable-ssl \
-            --use-curl=no \
-            --use-js=no \
-            --use-zlib=no \
-            2>&1 | tail -40
+          echo "=== Configure (--static-bin only) ==="
+          # --static-bin tek başına tüm dinamik-only bağımlılıkları kapatır
+          ./configure --static-bin 2>&1 | tail -40
 
           echo ""
-          echo "=== config.mak bağımlılık özeti ==="
-          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|CONFIG_ZLIB|STATIC)" config.mak || true
+          echo "=== config.mak — kritik satırlar ==="
+          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|GPAC_STATIC)" config.mak || true
 
           echo ""
           echo "=== Derleme ==="
@@ -132,7 +117,7 @@ jobs:
           MP4BOX_BIN="bin/gcc/MP4Box"
           [ -f "$MP4BOX_BIN" ] || {
             echo "MP4Box derleme basarisiz! bin icerigi:"
-            find bin/ -type f | head -20
+            find bin/ -type f 2>/dev/null | head -20
             exit 1
           }
 
@@ -140,12 +125,11 @@ jobs:
           cp "$MP4BOX_BIN" "$GITHUB_WORKSPACE/out/MP4Box"
 
           echo ""
-          echo "=== MP4Box bağımlılıkları ==="
+          echo "=== MP4Box dinamik bağımlılıkları ==="
           otool -L "$GITHUB_WORKSPACE/out/MP4Box"
 
           echo ""
-          echo "=== Yasak bağımlılık kontrolü ==="
-          # Yalnızca macOS system lib'leri kabul edilir
+          echo "=== Taşınamaz bağımlılık kontrolü ==="
           FORBIDDEN=$(otool -L "$GITHUB_WORKSPACE/out/MP4Box" \
             | tail -n +2 \
             | awk '{print $1}' \
@@ -155,11 +139,11 @@ jobs:
             || true)
 
           if [ -n "$FORBIDDEN" ]; then
-            echo "HATA: Tasinamaz dinamik bagimliliklar:"
+            echo "HATA: Asagidaki bagimliliklar tasinamaz:"
             echo "$FORBIDDEN"
             exit 1
           fi
-          echo "OK: Tum bagimliliklar system library."
+          echo "OK: Tum bagimliliklar macOS system library."
           echo "arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
 
       # ── Doğrulama ─────────────────────────────────────────────────
@@ -307,8 +291,7 @@ jobs:
             | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de     |
             | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, sıfır dış bağımlılık |
 
-            > **MP4Box** `--static-bin --disable-ssl --use-curl=no` ile derlendi.
-            > Dış `.dylib` bağımlılığı yoktur — doğrudan çalışır.
+            > **MP4Box** `--static-bin` ile derlendi — dış `.dylib` bağımlılığı yoktur.
 
             ### Hızlı kurulum
             ```bash
