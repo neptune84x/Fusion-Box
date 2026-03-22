@@ -1,10 +1,8 @@
 name: Build Universal Tools
 on: 
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
 
 jobs:
   build-universal:
@@ -17,41 +15,49 @@ jobs:
       - name: Create Directories
         run: mkdir -p bin/arm64 bin/x86_64 out
 
-      - name: Download FFmpeg & FFprobe (User Provided Links)
+      - name: Download FFmpeg & FFprobe (User Provided)
         run: |
-          # ARM64 (Apple Silicon)
+          # ARM64
           curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffmpeg.zip -o arm_ff.zip
           unzip -o arm_ff.zip -d bin/arm64/
           curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffprobe.zip -o arm_pr.zip
           unzip -o arm_pr.zip -d bin/arm64/
-          
-          # Intel (x86_64)
+          # Intel
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip -o intel_ff.zip
           unzip -o intel_ff.zip -d bin/x86_64/
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      - name: Install MP4Box via Brew (Native ARM64)
+      - name: Build MP4Box (Forced Static)
         run: |
-          brew install gpac
-          cp $(which mp4box) bin/arm64/mp4box
+          git clone --depth 1 https://github.com/gpac/gpac.git source
+          
+          # --- ARM64 (Native) ---
+          cd source
+          mkdir -p include/gpac
+          ./configure --static-bin --disable-x11 --disable-gl --disable-graphics --disable-ffmpeg --enable-vtt \
+            --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64 -static-libgcc"
+          make -j$(sysctl -n hw.ncpu)
+          cp bin/gcc/MP4Box ../bin/arm64/mp4box || cp bin/gcc/mp4box ../bin/arm64/mp4box
+          
+          # --- Intel (x86_64) ---
+          make distclean
+          mkdir -p include/gpac
+          ./configure --static-bin --disable-x11 --disable-gl --disable-graphics --disable-ffmpeg --enable-vtt \
+            --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64 -static-libgcc"
+          make -j$(sysctl -n hw.ncpu)
+          cp bin/gcc/MP4Box ../bin/x86_64/mp4box || cp bin/gcc/mp4box ../bin/x86_64/mp4box
+          cd ..
 
-      - name: Install MP4Box via Brew (Rosetta x86_64 Virtual)
-        run: |
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install gpac
-          cp /usr/local/bin/mp4box bin/x86_64/mp4box
-
-      - name: Create Universal Binaries (Lipo)
+      - name: Create Universal Binaries
         run: |
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           chmod +x out/*
           
-          echo "Final Doğrulama:"
-          file out/ffmpeg
-          file out/mp4box
+          echo "Bağımlılık Kontrolü (Sadece sistem kütüphaneleri görünmeli):"
+          otool -L out/mp4box
 
       - name: Create or Update Release
         uses: ncipollo/release-action@v1
@@ -59,7 +65,6 @@ jobs:
           artifacts: "out/*"
           tag: "latest"
           name: "Fusion Universal Tools"
-          body: "Otomatik derlenen Universal (ARM64 + x86_64) FFmpeg, FFprobe ve MP4Box araçları."
           allowUpdates: true
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
