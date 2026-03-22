@@ -27,32 +27,29 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      - name: Build MP4Box (Static & Portable)
+      - name: Build MP4Box (Isolated Build Folders)
         run: |
-          git clone --depth 1 https://github.com/gpac/gpac.git gpac_source
+          git clone --depth 1 https://github.com/gpac/gpac.git source_root
           
-          # --- ARM64 DERLEMESİ ---
-          cp -R gpac_source gpac_arm64 && cd gpac_arm64
-          # Logdaki 'revision.h' hatasını manuel çözüyoruz
+          # --- 1. ARM64 DERLEMESİ (AYRI KLASÖR) ---
+          cp -R source_root gpac_arm64 && cd gpac_arm64
           mkdir -p include/gpac
           echo '#define GPAC_REVISION "master"' > include/gpac/revision.h
-          
-          # Tanınmayan 'gl' ve 'graphics' yerine güncel bayrakları kullanıyoruz
           ./configure --static-bin --disable-x11 --disable-ffmpeg --enable-vtt \
             --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
-          cp bin/gcc/MP4Box ../bin/arm64/mp4box || cp bin/gcc/mp4box ../bin/arm64/mp4box
+          # Klasör içindeki binary ismini kontrol ederek kopyala
+          [ -f bin/gcc/MP4Box ] && cp bin/gcc/MP4Box ../bin/arm64/mp4box || cp bin/gcc/mp4box ../bin/arm64/mp4box
           cd ..
 
-          # --- INTEL (X86_64) DERLEMESİ ---
-          cp -R gpac_source gpac_x86_64 && cd gpac_x86_64
+          # --- 2. INTEL DERLEMESİ (AYRI KLASÖR) ---
+          cp -R source_root gpac_intel && cd gpac_intel
           mkdir -p include/gpac
           echo '#define GPAC_REVISION "master"' > include/gpac/revision.h
-          
           ./configure --static-bin --disable-x11 --disable-ffmpeg --enable-vtt \
             --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
-          cp bin/gcc/MP4Box ../bin/x86_64/mp4box || cp bin/gcc/mp4box ../bin/x86_64/mp4box
+          [ -f bin/gcc/MP4Box ] && cp bin/gcc/MP4Box ../bin/x86_64/mp4box || cp bin/gcc/mp4box ../bin/x86_64/mp4box
           cd ..
 
       - name: Create Universal Binaries (Lipo)
@@ -62,9 +59,9 @@ jobs:
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           chmod +x out/*
           
-          echo "Doğrulama:"
-          file out/mp4box
-          # Kütüphane bağımlılığını kontrol et (Sadece sistem dylibleri kalmalı)
+          echo "Doğrulama (Binary Mimarileri):"
+          file out/*
+          echo "Dinamik Bağımlılık Kontrolü (Sadece sistem dylibleri olmalı):"
           otool -L out/mp4box
 
       - name: Create or Update Release
