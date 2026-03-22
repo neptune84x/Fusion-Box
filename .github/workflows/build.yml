@@ -12,12 +12,16 @@ permissions:
 # AÇIKLAMA
 # ══════════════════════════════════════════════════════════════════════
 # Job 1 — build-arch (matrix: arm64 + x86_64)
-#   macos-latest    → arm64  (Apple Silicon, M serisi)
-#   macos-15-intel  → x86_64 (Intel, macos-13 kaldırıldı Ara 2025)
+#   macos-latest    → arm64  (Apple Silicon)
+#   macos-15-intel  → x86_64 (Intel)
 #
 #   FFmpeg/FFprobe : hazır static binary (arch'a göre farklı kaynak)
-#   MP4Box         : GPAC kaynak kodundan --static-mp4box ile derlenir
-#                    → libgpac.dylib bağımlılığı yok, portable binary
+#   MP4Box         : GPAC kaynak kodundan derlenir.
+#                    Sorun: --static-mp4box tek başına yeterli değil,
+#                    nghttp2/curl gibi bağımlılıklar dinamik kalıyor.
+#                    Çözüm: brew'daki sorunlu paketleri configure öncesi
+#                    unlink et, configure'a --use-curl=no --use-openssl=no
+#                    --use-nghttp2=no ekle → sıfır dış bağımlılık.
 #
 # Job 2 — create-universal
 #   İki artifact'ı alır, lipo ile universal binary oluşturur, release yayınlar.
@@ -25,9 +29,6 @@ permissions:
 
 jobs:
 
-  # ────────────────────────────────────────────────────────────────────
-  # JOB 1: Her iki arch için binary üret
-  # ────────────────────────────────────────────────────────────────────
   build-arch:
     name: Build ${{ matrix.arch }}
     strategy:
@@ -35,9 +36,9 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-latest    # Apple Silicon (M serisi)
+            runner: macos-latest
           - arch: x86_64
-            runner: macos-15-intel  # Intel — macos-13 kaldırıldı, yeni label bu
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -50,12 +51,10 @@ jobs:
           set -euo pipefail
 
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            # arm64: ffmpeg.martin-riedl.de (doğrulanmış permalink)
             BASE="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release"
             curl -fsSL "$BASE/ffmpeg.zip"  -o /tmp/ffmpeg.zip
             curl -fsSL "$BASE/ffprobe.zip" -o /tmp/ffprobe.zip
           else
-            # x86_64: evermeet.cx (Intel only static build, doğrulanmış)
             curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"  -o /tmp/ffmpeg.zip
             curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
           fi
@@ -76,50 +75,101 @@ jobs:
           echo "ffmpeg  arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffmpeg)"
           echo "ffprobe arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffprobe)"
 
-      # ── MP4Box: kaynak koddan static derleme ─────────────────────
-      # --static-mp4box: libgpac'ı binary içine gömer
-      # Sonuç: dış .dylib bağımlılığı olmayan taşınabilir binary
-      - name: Install MP4Box build dependencies
+      # ── MP4Box: sıfır dış bağımlılıklı derleme ───────────────────
+      #
+      # Sorun kökü: GPAC configure scripti, brew ile kurulu nghttp2/curl/openssl
+      # bulunca bunları otomatik olarak dinamik bağlar. Binary taşınınca bu
+      # kütüphaneler hedef sistemde olmadığı için dyld hatası alınır.
+      #
+      # Çözüm:
+      #   1. Sorunlu brew paketlerini configure öncesi unlink et
+      #      (header/lib dizinlerini görünmez kılar, autodetect çalışmaz)
+      #   2. --use-curl=no --use-openssl=no ile network özelliklerini kapat
+      #   3. --static-mp4box ile libgpac'ı binary içine göm
+      #   4. Derleme sonrası otool ile bağımlılık kontrolü yap
+      #
+      - name: Build MP4Box from source (zero external deps)
         run: |
           set -euo pipefail
-          brew install cmake pkg-config
 
-      - name: Build MP4Box from source (static)
-        run: |
-          set -euo pipefail
+          # ── brew paketlerini unlink (configure'un görmemesi için) ──
+          # unlink başarısız olursa (zaten yok) devam et
+          brew unlink nghttp2  2>/dev/null || true
+          brew unlink curl     2>/dev/null || true
+          brew unlink openssl  2>/dev/null || true
+          brew unlink openssl@3 2>/dev/null || true
+          brew unlink libpng   2>/dev/null || true
+          brew unlink jpeg     2>/dev/null || true
+          brew unlink libjpeg  2>/dev/null || true
 
-          echo "=== GPAC klonlanıyor ==="
+          # ── GPAC klonla ───────────────────────────────────────────
           git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac
           cd /tmp/gpac
 
-          echo "=== Configure ==="
-          # --static-mp4box: libgpac statik olarak MP4Box binary'ye gömülür
-          # --use-zlib=no: macOS system zlib ile conflict önlenir
+          # ── Configure ─────────────────────────────────────────────
+          # --static-mp4box  : libgpac'ı binary içine gömer
+          # --use-zlib=no    : zlib bağımlılığını kaldır
+          # --use-curl=no    : curl/nghttp2 bağımlılığını kaldır
+          # --use-openssl=no : openssl bağımlılığını kaldır
+          # --use-png=no     : libpng bağımlılığını kaldır
+          # --use-jpeg=no    : libjpeg bağımlılığını kaldır
           ./configure \
             --static-mp4box \
             --use-zlib=no \
+            --use-curl=no \
+            --use-openssl=no \
+            --use-png=no \
+            --use-jpeg=no \
             2>&1 | tail -30
 
-          echo "=== Derleme ==="
+          # Config özeti — bağımlılıkların "no" olduğunu doğrula
+          echo ""
+          echo "=== config.mak bağımlılık özeti ==="
+          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|CONFIG_PNG|CONFIG_JPEG|CONFIG_ZLIB)" config.mak || true
+
+          # ── Derleme ───────────────────────────────────────────────
           make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -40
 
           MP4BOX_BIN="bin/gcc/MP4Box"
-          [ -f "$MP4BOX_BIN" ] || { echo "MP4Box derleme basarisiz!"; ls -la bin/gcc/ 2>/dev/null || ls -la bin/; exit 1; }
+          [ -f "$MP4BOX_BIN" ] || {
+            echo "MP4Box derleme basarisiz!"
+            ls -la bin/gcc/ 2>/dev/null || ls -la bin/
+            exit 1
+          }
 
           chmod +x "$MP4BOX_BIN"
           cp "$MP4BOX_BIN" "$GITHUB_WORKSPACE/out/MP4Box"
 
+          # ── Bağımlılık doğrulaması ─────────────────────────────────
           echo ""
-          echo "=== MP4Box kontrol ==="
-          echo "Arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
-          echo "Dinamik bagimliliklar:"
-          # Yalnizca system library'lere bagimli olmali (/usr/lib, /System)
-          otool -L "$GITHUB_WORKSPACE/out/MP4Box" | grep -v "^$GITHUB_WORKSPACE"
+          echo "=== MP4Box bağımlılıkları ==="
+          otool -L "$GITHUB_WORKSPACE/out/MP4Box"
+
+          echo ""
+          echo "=== Yasak bağımlılık kontrolü ==="
+          # Yalnızca macOS system lib'leri kabul edilir (/usr/lib, /System)
+          FORBIDDEN=$(otool -L "$GITHUB_WORKSPACE/out/MP4Box" \
+            | tail -n +2 \
+            | awk '{print $1}' \
+            | grep -v "^/usr/lib" \
+            | grep -v "^/System" \
+            | grep -v "^/lib" \
+            || true)
+
+          if [ -n "$FORBIDDEN" ]; then
+            echo "HATA: Tasinabilir olmayan dinamik bagimliliklar bulundu:"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+          echo "OK: Tüm bağımlılıklar system library'lerden."
+
+          echo ""
+          echo "arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
 
       # ── Doğrulama & çalışma testi ─────────────────────────────────
-      - name: Verify binaries
+      - name: Verify binaries (${{ matrix.arch }})
         run: |
-          echo "=== ${{ matrix.arch }} binary kontrolu ==="
+          echo "=== ${{ matrix.arch }} binary kontrolü ==="
           for BIN in ffmpeg ffprobe MP4Box; do
             echo ""
             echo "-- $BIN --"
@@ -128,7 +178,7 @@ jobs:
             "$GITHUB_WORKSPACE/out/$BIN" -version 2>&1 | head -1 || true
           done
 
-      # ── Artifact olarak yükle ─────────────────────────────────────
+      # ── Artifact yükle ────────────────────────────────────────────
       - name: Upload artifact (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
@@ -159,12 +209,10 @@ jobs:
 
       - name: Show downloaded binaries
         run: |
-          echo "=== arm64 ==="
-          file binaries/arm64/*
-          echo "=== x86_64 ==="
-          file binaries/x86_64/*
+          echo "=== arm64 ===" && file binaries/arm64/*
+          echo "=== x86_64 ===" && file binaries/x86_64/*
 
-      # ── lipo: Universal Binary oluştur ───────────────────────────
+      # ── lipo ─────────────────────────────────────────────────────
       - name: Create universal binaries with lipo
         run: |
           set -euo pipefail
@@ -177,29 +225,22 @@ jobs:
 
             echo ""
             echo "== $BIN =="
-
             [ -f "$ARM" ] || { echo "Eksik: $ARM"; exit 1; }
             [ -f "$X86" ] || { echo "Eksik: $X86"; exit 1; }
-
             chmod +x "$ARM" "$X86"
 
             ARM_ARCHS=$(lipo -archs "$ARM" 2>/dev/null || echo "unknown")
             X86_ARCHS=$(lipo -archs "$X86" 2>/dev/null || echo "unknown")
-            echo "  arm binary archs : $ARM_ARCHS"
-            echo "  x86 binary archs : $X86_ARCHS"
+            echo "  arm : $ARM_ARCHS"
+            echo "  x86 : $X86_ARCHS"
 
-            # Zaten universal ise doğrudan kullan
             if [[ "$ARM_ARCHS" == *"arm64"* && "$ARM_ARCHS" == *"x86_64"* ]]; then
-              echo "  -> arm binary zaten universal"
               cp "$ARM" "$OUT"
             elif [[ "$X86_ARCHS" == *"arm64"* && "$X86_ARCHS" == *"x86_64"* ]]; then
-              echo "  -> x86 binary zaten universal"
               cp "$X86" "$OUT"
             else
-              # Her binary sadece kendi arch'ını içermeli — fazla slice varsa thin et
               LIPO_ARM="$ARM"
               LIPO_X86="$X86"
-
               if [[ "$ARM_ARCHS" == *"x86_64"* ]]; then
                 lipo "$ARM" -thin arm64 -output /tmp/${BIN}_arm_only
                 LIPO_ARM="/tmp/${BIN}_arm_only"
@@ -208,35 +249,28 @@ jobs:
                 lipo "$X86" -thin x86_64 -output /tmp/${BIN}_x86_only
                 LIPO_X86="/tmp/${BIN}_x86_only"
               fi
-
               lipo -create -output "$OUT" "$LIPO_ARM" "$LIPO_X86"
             fi
 
             chmod +x "$OUT"
             RESULT=$(lipo -archs "$OUT")
-            echo "  Sonuc: $RESULT"
-
-            if [[ "$RESULT" != *"arm64"* ]] || [[ "$RESULT" != *"x86_64"* ]]; then
-              echo "HATA: $BIN universal degil!"
-              exit 1
-            fi
-            echo "  OK"
+            echo "  sonuc: $RESULT"
+            [[ "$RESULT" == *"arm64"* && "$RESULT" == *"x86_64"* ]] \
+              || { echo "HATA: $BIN universal degil!"; exit 1; }
           done
 
       # ── Doğrulama ────────────────────────────────────────────────
       - name: Verify universal binaries
         run: |
-          echo "================================"
-          echo "  Universal Binary Dogrulama"
-          echo "================================"
           for BIN in ffmpeg ffprobe MP4Box; do
-            echo ""
             echo "-- $BIN --"
             file "universal/$BIN"
             lipo -info "universal/$BIN"
+            echo "Bagimliliklar:"
+            otool -L "universal/$BIN" | tail -n +2 | awk '{print "  "$1}'
+            echo ""
           done
-          echo ""
-          echo "-- Calisma testi (native arm64) --"
+          echo "-- Calisma testleri --"
           ./universal/ffmpeg  -version 2>&1 | head -1
           ./universal/ffprobe -version 2>&1 | head -1
           ./universal/MP4Box  -version 2>&1 | head -1 || true
@@ -266,9 +300,9 @@ jobs:
         run: |
           FFMPEG_VER=$(./universal/ffmpeg -version 2>&1 | grep "ffmpeg version" | awk '{print $3}' || echo "unknown")
           MP4BOX_VER=$(./universal/MP4Box -version 2>&1 | head -1 || echo "nightly")
-          echo "ffmpeg_ver=$FFMPEG_VER"        >> "$GITHUB_OUTPUT"
-          echo "mp4box_ver=$MP4BOX_VER"        >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y%m%d)"       >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_ver=$FFMPEG_VER"  >> "$GITHUB_OUTPUT"
+          echo "mp4box_ver=$MP4BOX_VER"  >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       # ── Release yayınla ───────────────────────────────────────────
       - name: Publish latest release
@@ -279,13 +313,14 @@ jobs:
           body: |
             ## macOS Universal Binaries — arm64 (Apple Silicon) + x86_64 (Intel)
 
-            | Binary  | Versiyon                              | Notlar                        |
-            |---------|---------------------------------------|-------------------------------|
-            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de |
-            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de |
-            | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, static derleme   |
+            | Binary  | Versiyon                              | Notlar                           |
+            |---------|---------------------------------------|----------------------------------|
+            | ffmpeg  | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de    |
+            | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de    |
+            | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, sıfır dış bağımlılık |
 
-            > **MP4Box** `--static-mp4box` ile derlendi — `libgpac.dylib` bağımlılığı yoktur.
+            > **MP4Box** `--static-mp4box --use-curl=no --use-openssl=no` ile derlendi.
+            > Dış `.dylib` bağımlılığı yoktur — doğrudan çalışır.
 
             ### Hızlı kurulum
             ```bash
@@ -295,8 +330,8 @@ jobs:
             cd media-tools
             chmod +x ffmpeg ffprobe MP4Box
             xattr -dr com.apple.quarantine ffmpeg ffprobe MP4Box
-            ./ffmpeg -version
             ./MP4Box -version
+            ./ffmpeg -version
             ```
 
             > Binary'ler hem Apple Silicon (M1/M2/M3/M4) hem Intel Mac'lerde native çalışır.
