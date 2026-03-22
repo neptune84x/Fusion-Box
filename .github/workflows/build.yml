@@ -1,55 +1,62 @@
-- name: Build GPAC (MP4Box)
+name: Build Universal Tools
+on: [push]
+
+jobs:
+  build-universal:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Directories
+        run: mkdir -p bin/arm64 bin/x86_64 out
+
+      - name: Download FFmpeg & FFprobe
         run: |
-          # Temiz kaynak kodu çekelim
+          # ARM64
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffmpeg.zip -o arm_ff.zip
+          unzip -o arm_ff.zip -d bin/arm64/
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffprobe.zip -o arm_pr.zip
+          unzip -o arm_pr.zip -d bin/arm64/
+          # Intel
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip -o intel_ff.zip
+          unzip -o intel_ff.zip -d bin/x86_64/
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
+          unzip -o intel_pr.zip -d bin/x86_64/
+
+      - name: Build GPAC (MP4Box)
+        run: |
           git clone --depth 1 https://github.com/gpac/gpac.git gpac_source
           
-          # --- ARM64 Derlemesi ---
+          # ARM64 Derlemesi
           cp -R gpac_source gpac_arm64
           cd gpac_arm64
           mkdir -p include/gpac
-          
-          # GPAC özel yapılandırması: --host kullanılmaz, mimari cflags ile verilir
-          ./configure --static-bin \
-            --disable-x11 \
-            --disable-gl \
-            --disable-graphics \
-            --disable-ffmpeg \
-            --enable-vtt \
-            --extra-cflags="-arch arm64" \
-            --extra-ldflags="-arch arm64"
-          
+          ./configure --static-bin --disable-x11 --disable-gl --disable-graphics --disable-ffmpeg --enable-vtt --prefix=./inst --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
-          # Binary adı MP4Box veya mp4box olabilir, ikisini de kontrol et
-          cp bin/gcc/MP4Box ../bin/arm64/mp4box || cp bin/gcc/mp4box ../bin/arm64/mp4box
+          if [ -f bin/gcc/MP4Box ]; then cp bin/gcc/MP4Box ../bin/arm64/mp4box; else cp bin/gcc/mp4box ../bin/arm64/mp4box; fi
           cd ..
 
-          # --- x86_64 Derlemesi ---
+          # Intel (x86_64) Derlemesi
           cp -R gpac_source gpac_x86_64
           cd gpac_x86_64
           mkdir -p include/gpac
-          
-          ./configure --static-bin \
-            --disable-x11 \
-            --disable-gl \
-            --disable-graphics \
-            --disable-ffmpeg \
-            --enable-vtt \
-            --extra-cflags="-arch x86_64" \
-            --extra-ldflags="-arch x86_64"
-          
+          ./configure --static-bin --disable-x11 --disable-gl --disable-graphics --disable-ffmpeg --enable-vtt --prefix=./inst --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
-          cp bin/gcc/MP4Box ../bin/x86_64/mp4box || cp bin/gcc/mp4box ../bin/x86_64/mp4box
+          if [ -f bin/gcc/MP4Box ]; then cp bin/gcc/MP4Box ../bin/x86_64/mp4box; else cp bin/gcc/mp4box ../bin/x86_64/mp4box; fi
           cd ..
 
       - name: Create Universal Binaries (Lipo)
         run: |
-          # Mimari birleştirme
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
-          
           chmod +x out/*
-          
-          echo "Universal Binary Check:"
+          echo "Final Check:"
+          file out/ffmpeg
           file out/mp4box
-          out/mp4box -version
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Universal-Tools
+          path: out/
