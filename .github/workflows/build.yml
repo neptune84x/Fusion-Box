@@ -30,23 +30,23 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      # 2. MP4Box Derleme (Kaynak Kodundan - En Garanti Yol)
-      - name: Compile MP4Box (v2.4 veya 2.6 uyumlu)
+# MP4Box Derleme (Statik Binary Olarak)
+      - name: Compile MP4Box (Static)
         run: |
           git clone https://github.com/gpac/gpac.git
           cd gpac
           
-          # ARM Derlemesi
-          ./configure --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64" --prefix=../temp_arm
+          # ARM Derlemesi (Statik)
+          ./configure --static-bin --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/arm64/
           
-          # Temizlik ve Intel Derlemesi
+          # Temizlik ve Intel Derlemesi (Statik)
           make distclean
-          ./configure --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64" --prefix=../temp_intel
+          ./configure --static-bin --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/x86_64/
-
+          
       # 3. Lipo ile Birleştirme
       - name: Create Universal Binaries
         run: |
