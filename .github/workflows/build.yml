@@ -29,20 +29,21 @@ jobs:
           # GPAC kaynak kodunu indir
           git clone --depth 1 https://github.com/gpac/gpac.git gpac_source
           
-          # 1. ARM64 DERLEMESİ (Ayrı klasörde)
+          # 1. ARM64 DERLEMESİ (Tamamen izole klasör)
           cp -r gpac_source gpac_arm64
           cd gpac_arm64
-          ./configure --static-bin --disable-x11 --disable-opengl --disable-ffmpeg \
+          # Uyarı veren --disable-opengl kaldırıldı, yerine --disable-graphics eklendi (daha kapsamlı temizlik)
+          ./configure --static-bin --disable-x11 --disable-graphics --disable-ffmpeg \
             --enable-vtt --prefix=./inst \
             --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/arm64/
           cd ..
           
-          # 2. Intel (x86_64) DERLEMESİ (Ayrı klasörde)
+          # 2. Intel (x86_64) DERLEMESİ (Tamamen izole klasör)
           cp -r gpac_source gpac_x86_64
           cd gpac_x86_64
-          ./configure --static-bin --disable-x11 --disable-opengl --disable-ffmpeg \
+          ./configure --static-bin --disable-x11 --disable-graphics --disable-ffmpeg \
             --enable-vtt --prefix=./inst \
             --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
@@ -51,14 +52,13 @@ jobs:
 
       - name: Create Universal Binaries (Lipo)
         run: |
-          # İki mimariyi birleştiriyoruz
+          # İki mimariyi birleştir
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           
           chmod +x out/*
           
-          # Başarı kontrolü
           echo "Universal Binary Check:"
           file out/ffmpeg
           file out/mp4box
