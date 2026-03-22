@@ -1,7 +1,7 @@
 name: Build Universal Tools
 on: 
   push:
-  workflow_dispatch: # Actions sekmesinden manuel tetikleyebilmen için eklendi
+  workflow_dispatch:
 
 jobs:
   build-universal:
@@ -14,13 +14,13 @@ jobs:
 
       - name: Download FFmpeg & FFprobe (Pre-built)
         run: |
-          # ARM64 için FFmpeg
+          # ARM64 FFmpeg & FFprobe
           curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffmpeg.zip -o arm_ff.zip
           unzip -o arm_ff.zip -d bin/arm64/
           curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffprobe.zip -o arm_pr.zip
           unzip -o arm_pr.zip -d bin/arm64/
           
-          # Intel için FFmpeg
+          # Intel FFmpeg & FFprobe
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip -o intel_ff.zip
           unzip -o intel_ff.zip -d bin/x86_64/
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
@@ -28,19 +28,23 @@ jobs:
 
       - name: Build MP4Box (GPAC v26.02.0 Static)
         run: |
-          # GPAC'ın stabil 26.02 release (v26.02.0) sürümünü klonluyoruz
-          git clone --depth 1 --branch v26.02.0 https://github.com/gpac/gpac.git
+          # Sığ klonlama hatasından kaçınmak için normal klonlayıp tag'e geçiyoruz
+          git clone https://github.com/gpac/gpac.git
           cd gpac
+          git checkout tags/v26.02.0
           
-          # Ortak Konfigürasyon: opengl parametresi kaldırıldı, x11 ve ffmpeg kapalı, vtt açık, statik bağlantı devrede
+          # Konfigürasyon: Statik, X11 yok, FFmpeg bağımlılığı yok, VTT desteği var
+          # Not: --disable-opengl yeni sürümlerde hata verebildiği için kaldırıldı veya otomatik yönetiliyor
           COMMON_CONFIG="--static-bin --disable-x11 --disable-ffmpeg --enable-vtt --prefix=./inst"
           
-          # ARM64 Derlemesi
+          # 1. ARM64 (Apple Silicon) Derlemesi
+          echo "Building for ARM64..."
           ./configure $COMMON_CONFIG --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/arm64/
           
-          # Temizlik ve Intel (x86_64) Derlemesi
+          # 2. Temizlik ve Intel (x86_64) Derlemesi
+          echo "Cleaning and building for x86_64..."
           make distclean
           ./configure $COMMON_CONFIG --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
@@ -48,17 +52,19 @@ jobs:
 
       - name: Create Universal Binaries (Lipo)
         run: |
-          # İki mimariyi tek bir dosyada birleştiriyoruz
+          # Fusion-Box için tüm araçları Universal (Intel + Mac) hale getiriyoruz
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           
           chmod +x out/*
           
-          # Test: Mimarilerin doğru yazıldığını görelim
-          echo "Universal Binary Check:"
+          # Doğrulama testi
+          echo "### BINARY ARCHITECTURES ###"
           file out/ffmpeg
           file out/mp4box
+          echo "### MP4BOX VERSION CHECK ###"
+          ./out/mp4box -version 2>&1 | grep version
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
@@ -66,7 +72,8 @@ jobs:
         with:
           files: out/*
           tag_name: latest
-          name: Fusion Universal Tools
+          name: Fusion Universal Tools (v26.02.0)
+          body: "FFmpeg 8.0.1 and GPAC (MP4Box) v26.02.0 Static Universal Binaries"
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
