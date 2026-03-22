@@ -1,4 +1,4 @@
-name: Build Universal Tools with Brew
+name: Build Universal Tools
 on: [push]
 
 jobs:
@@ -10,45 +10,56 @@ jobs:
       - name: Create Directories
         run: mkdir -p bin/arm64 bin/x86_64 out
 
-      - name: Install Tools via Brew (Native ARM64)
+      - name: Download FFmpeg & FFprobe (User Provided Links)
         run: |
-          # Mevcut runner (ARM64) üzerinde araçları kur
-          brew install ffmpeg gpac
+          # ARM64 (Apple Silicon) - Senin sağladığın linkler
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffmpeg.zip -o arm_ff.zip
+          unzip -o arm_ff.zip -d bin/arm64/
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffprobe.zip -o arm_pr.zip
+          unzip -o arm_pr.zip -d bin/arm64/
           
-          # Binary yollarını kopyala
-          cp $(which ffmpeg) bin/arm64/ffmpeg
-          cp $(which ffprobe) bin/arm64/ffprobe
+          # Intel (x86_64) - Senin sağladığın linkler
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip -o intel_ff.zip
+          unzip -o intel_ff.zip -d bin/x86_64/
+          curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
+          unzip -o intel_pr.zip -d bin/x86_64/
+
+      - name: Install MP4Box via Brew (Native ARM64)
+        run: |
+          # Varsayılan ARM64 Brew üzerinden kurulum
+          brew install gpac
           cp $(which mp4box) bin/arm64/mp4box
 
-      - name: Install Tools via Brew (Rosetta x86_64)
+      - name: Install MP4Box via Brew (Rosetta x86_64 Virtual)
         run: |
-          # x86_64 (Intel) mimarisi için Rosetta üzerinden brew kurulumu
+          # Intel mimarisi için izole (virtual) Homebrew kurulumu
           arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install ffmpeg gpac
           
-          # Intel binary yollarını kopyala (/usr/local/bin altında oluşur)
-          cp /usr/local/bin/ffmpeg bin/x86_64/ffmpeg
-          cp /usr/local/bin/ffprobe bin/x86_64/ffprobe
+          # Rosetta Brew (/usr/local/bin/brew) üzerinden Intel MP4Box kurulumu
+          arch -x86_64 /usr/local/bin/brew install gpac
           cp /usr/local/bin/mp4box bin/x86_64/mp4box
 
       - name: Create Universal Binaries (Lipo)
         run: |
-          # İki farklı dünyayı birleştirme
+          # Senin linklerinden gelen FFmpeg/FFprobe ve Brew'dan gelen MP4Box'ları birleştiriyoruz
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
           lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           
           chmod +x out/*
           
-          echo "Doğrulama Yapılıyor:"
+          echo "Final Doğrulama:"
           file out/ffmpeg
           file out/mp4box
-          
-          out/ffmpeg -version | head -n 1
           out/mp4box -version | head -n 1
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: Universal-Tools-Brew
-          path: out/
+          files: out/*
+          tag_name: latest
+          name: Fusion Universal Tools
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
