@@ -8,23 +8,6 @@ on:
 permissions:
   contents: write
 
-# ══════════════════════════════════════════════════════════════════════
-# AÇIKLAMA
-# ══════════════════════════════════════════════════════════════════════
-# Job 1 — build-arch (matrix: arm64 + x86_64)
-#   macos-latest    → arm64  (Apple Silicon)
-#   macos-15-intel  → x86_64 (Intel)
-#
-#   FFmpeg/FFprobe : hazır static binary
-#   MP4Box         : GPAC kaynak kodundan --static-bin ile derlenir.
-#                    --static-bin = "disable all libraries not linkable
-#                    statically" → curl/nghttp2/openssl otomatik kapanır.
-#                    Ekstra --use-*=no flag'lerine gerek YOK.
-#
-# Job 2 — create-universal
-#   lipo ile universal binary oluşturur, latest release yayınlar.
-# ══════════════════════════════════════════════════════════════════════
-
 jobs:
 
   build-arch:
@@ -73,27 +56,36 @@ jobs:
           echo "ffmpeg  arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffmpeg)"
           echo "ffprobe arch: $(lipo -archs $GITHUB_WORKSPACE/out/ffprobe)"
 
-      # ── MP4Box: --static-bin ile kaynak derleme ───────────────────
+      # ── MP4Box ────────────────────────────────────────────────────
       #
-      # --static-bin dokümantasyonu:
-      #   "enable static linking of MP4Box and gpac only
-      #    (will enable --static-build),
-      #    disable all libraries not linkable statically."
+      # Sorun: GPAC configure, brew'daki libpng / libnghttp2 / freetype /
+      #        openssl'ı bulunca dinamik bağlar. --static-bin macOS'ta
+      #        "cannot remove all dependencies" der, kütüphaneleri yine bağlar.
       #
-      # Yani curl, nghttp2, openssl gibi dinamik-only kütüphaneler
-      # GPAC'ın kendi configure'u tarafından otomatik devre dışı bırakılır.
-      # Ekstra --use-*=no flag'i GEREKMEZ ve hata verir.
+      # Çözüm: Sorunlu brew paketlerini configure ÖNCE tamamen uninstall et.
+      #        GPAC configure kütüphaneyi bulamazsa o özelliği kapatır.
+      #        Sonuç: yalnızca macOS system lib'lerine (/usr/lib, /System) bağlı binary.
       #
-      # Ek olarak brew'daki curl/openssl/nghttp2'yi uninstall ediyoruz;
-      # configure autodetect sırasında yanlış static lib bulmasın diye.
+      # Kaldırılan paketler ve etkileri:
+      #   libpng     → PNG desteği kapanır (MP4Box için kritik değil)
+      #   libnghttp2 → HTTP/2 desteği kapanır
+      #   openssl@3  → TLS desteği kapanır (MP4Box CLI için yeterli)
+      #   freetype   → font render kapanır (MP4Box text overlay yok)
       #
-      - name: Remove brew packages that could cause dynamic linking
+      - name: Remove brew packages that cause dynamic linking
         run: |
-          brew uninstall --ignore-dependencies nghttp2  2>/dev/null || true
-          brew uninstall --ignore-dependencies openssl  2>/dev/null || true
-          brew uninstall --ignore-dependencies openssl@3 2>/dev/null || true
-          # curl'ü kaldırma — sistem curl'ü bozabilir; sadece unlink yeterli
-          brew unlink curl 2>/dev/null || true
+          set -euo pipefail
+          # --ignore-dependencies: bağımlı paketleri de kaldırmaya uğraşmaz
+          # 2>/dev/null || true: paket yoksa sessizce devam et
+          for pkg in libpng libnghttp2 nghttp2 openssl openssl@3 freetype freetype2; do
+            brew uninstall --ignore-dependencies "$pkg" 2>/dev/null || true
+          done
+
+          echo "=== Kalan pkg-config durumu ==="
+          pkg-config --exists libpng     && echo "libpng    : HALA MEVCUT" || echo "libpng    : kaldırıldı"
+          pkg-config --exists libnghttp2 && echo "libnghttp2: HALA MEVCUT" || echo "libnghttp2: kaldırıldı"
+          pkg-config --exists openssl    && echo "openssl   : HALA MEVCUT" || echo "openssl   : kaldırıldı"
+          pkg-config --exists freetype2  && echo "freetype  : HALA MEVCUT" || echo "freetype  : kaldırıldı"
 
       - name: Build MP4Box from source (static-bin)
         run: |
@@ -102,21 +94,20 @@ jobs:
           git clone --depth 1 https://github.com/gpac/gpac.git /tmp/gpac
           cd /tmp/gpac
 
-          echo "=== Configure (--static-bin only) ==="
-          # --static-bin tek başına tüm dinamik-only bağımlılıkları kapatır
-          ./configure --static-bin 2>&1 | tail -40
+          echo "=== Configure ==="
+          ./configure --static-bin 2>&1 | tail -20
 
           echo ""
-          echo "=== config.mak — kritik satırlar ==="
-          grep -E "^(CONFIG_CURL|CONFIG_SSL|CONFIG_NGHTTP2|GPAC_STATIC)" config.mak || true
+          echo "=== config.mak: PNG / NGHTTP2 / SSL / FREETYPE durumu ==="
+          grep -iE "(png|nghttp2|ssl|freetype|curl)" config.mak || echo "(hic eslesme yok — iyi)"
 
           echo ""
           echo "=== Derleme ==="
-          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -50
+          make -j$(sysctl -n hw.logicalcpu) 2>&1 | tail -30
 
           MP4BOX_BIN="bin/gcc/MP4Box"
           [ -f "$MP4BOX_BIN" ] || {
-            echo "MP4Box derleme basarisiz! bin icerigi:"
+            echo "MP4Box derleme basarisiz!"
             find bin/ -type f 2>/dev/null | head -20
             exit 1
           }
@@ -143,10 +134,10 @@ jobs:
             echo "$FORBIDDEN"
             exit 1
           fi
+
           echo "OK: Tum bagimliliklar macOS system library."
           echo "arch: $(lipo -archs $GITHUB_WORKSPACE/out/MP4Box)"
 
-      # ── Doğrulama ─────────────────────────────────────────────────
       - name: Verify binaries (${{ matrix.arch }})
         run: |
           for BIN in ffmpeg ffprobe MP4Box; do
@@ -291,7 +282,7 @@ jobs:
             | ffprobe | `${{ steps.ver.outputs.ffmpeg_ver }}` | evermeet.cx + martin-riedl.de     |
             | MP4Box  | `${{ steps.ver.outputs.mp4box_ver }}` | GPAC kaynak, sıfır dış bağımlılık |
 
-            > **MP4Box** `--static-bin` ile derlendi — dış `.dylib` bağımlılığı yoktur.
+            > **MP4Box** kaynak koddan `--static-bin` ile derlendi — dış `.dylib` bağımlılığı yoktur.
 
             ### Hızlı kurulum
             ```bash
