@@ -1,5 +1,7 @@
 name: Build Universal Tools
-on: [push]
+on: 
+  push:
+  workflow_dispatch: # Actions sekmesinden manuel tetikleyebilmen için eklendi
 
 jobs:
   build-universal:
@@ -24,23 +26,23 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      - name: Build MP4Box (GPAC)
+      - name: Build MP4Box (GPAC v26.02.0 Static)
         run: |
-          git clone --depth 1 https://github.com/gpac/gpac.git
+          # GPAC'ın stabil 26.02 release (v26.02.0) sürümünü klonluyoruz
+          git clone --depth 1 --branch v26.02.0 https://github.com/gpac/gpac.git
           cd gpac
           
-          # ARM64 Derlemesi (Bağımlılıkları kırmayan güvenli config)
-          ./configure --static-bin --disable-x11 --disable-opengl --disable-ffmpeg \
-            --enable-vtt --prefix=./inst \
-            --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
+          # Ortak Konfigürasyon: opengl parametresi kaldırıldı, x11 ve ffmpeg kapalı, vtt açık, statik bağlantı devrede
+          COMMON_CONFIG="--static-bin --disable-x11 --disable-ffmpeg --enable-vtt --prefix=./inst"
+          
+          # ARM64 Derlemesi
+          ./configure $COMMON_CONFIG --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/arm64/
           
-          # Temizlik ve Intel Derlemesi
+          # Temizlik ve Intel (x86_64) Derlemesi
           make distclean
-          ./configure --static-bin --disable-x11 --disable-opengl --disable-ffmpeg \
-            --enable-vtt --prefix=./inst \
-            --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
+          ./configure $COMMON_CONFIG --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/x86_64/
 
@@ -53,14 +55,14 @@ jobs:
           
           chmod +x out/*
           
-          # Test
+          # Test: Mimarilerin doğru yazıldığını görelim
           echo "Universal Binary Check:"
           file out/ffmpeg
           file out/mp4box
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           files: out/*
           tag_name: latest
