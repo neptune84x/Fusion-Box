@@ -30,20 +30,26 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-# MP4Box Derleme (Statik Binary Olarak)
-      - name: Compile MP4Box (Static)
+# MP4Box Derleme (Hızlı ve Statik)
+      - name: Compile MP4Box (Static Core)
         run: |
-          git clone https://github.com/gpac/gpac.git
+          git clone --depth 1 https://github.com/gpac/gpac.git
           cd gpac
           
-          # ARM Derlemesi (Statik)
-          ./configure --static-bin --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
+          # Ortak Konfigürasyon: Sadece ihtiyacımız olanları bırakıyoruz
+          # --disable-all: Her şeyi kapatır
+          # --enable-isom: MP4/MOV desteğini açar (Bize lazım olan bu)
+          
+          # ARM Derlemesi
+          ./configure --static-bin --disable-all --enable-isom --enable-vtt \
+            --extra-cflags="-arch arm64" --extra-ldflags="-arch arm64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/arm64/
           
-          # Temizlik ve Intel Derlemesi (Statik)
+          # Temizlik ve Intel Derlemesi
           make distclean
-          ./configure --static-bin --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
+          ./configure --static-bin --disable-all --enable-isom --enable-vtt \
+            --extra-cflags="-arch x86_64" --extra-ldflags="-arch x86_64"
           make -j$(sysctl -n hw.ncpu)
           cp bin/gcc/mp4box ../bin/x86_64/
           
