@@ -1,13 +1,15 @@
 name: Fusion-Box Binary Factory
 on:
-  workflow_dispatch: # Manuel tetikleme için
+  workflow_dispatch: # Manuel tetikleme butonu ekler
   push:
     tags:
-      - 'v*' # v1.0.0 gibi bir tag basıldığında çalışır
+      - 'v*'
 
 jobs:
   create-universal-bins:
     runs-on: macos-latest
+    permissions:
+      contents: write # Release oluşturabilmek için kritik
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,29 +24,28 @@ jobs:
           curl -L https://ffmpeg.martin-riedl.de/download/macos/arm64/1766430132_8.0.1/ffprobe.zip -o arm_pr.zip
           unzip -o arm_pr.zip -d bin/arm64/
 
-      - name: Download FFmpeg & FFprobe (Intel/AMD64)
+      - name: Download FFmpeg & FFprobe (Intel/x86_64)
         run: |
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip -o intel_ff.zip
           unzip -o intel_ff.zip -d bin/x86_64/
           curl -L https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffprobe.zip -o intel_pr.zip
           unzip -o intel_pr.zip -d bin/x86_64/
 
-      - name: Install MP4Box (Universal via Brew)
+      - name: Download MP4Box (Static Binaries)
         run: |
-          brew install gpac
-          # GitHub Actions macOS Runner (ARM) üzerinde arm64 sürümü gelir
-          cp $(which mp4box) bin/arm64/mp4box
-          # Intel sürümü için Rosetta üzerinden brew çağrısı (veya mevcut arm/intel ayrımı)
-          # Not: Birçok brew paketi artık fat-binary olarak gelir, kontrol ediyoruz.
-          cp $(which mp4box) bin/x86_64/mp4box 
+          # ARM64 MP4Box
+          curl -L https://build.gpac.io/master/gpac-master-macos-arm64.zip -o gpac_arm.zip
+          unzip -j gpac_arm.zip "bin/gcc/mp4box" -d bin/arm64/
+          
+          # Intel MP4Box
+          curl -L https://build.gpac.io/master/gpac-master-macos-x86_64.zip -o gpac_intel.zip
+          unzip -j gpac_intel.zip "bin/gcc/mp4box" -d bin/x86_64/
 
       - name: Create Universal Binaries via Lipo
         run: |
           lipo -create bin/arm64/ffmpeg bin/x86_64/ffmpeg -output out/ffmpeg
           lipo -create bin/arm64/ffprobe bin/x86_64/ffprobe -output out/ffprobe
-          # MP4Box zaten universal ise kopyalar, değilse hata vermemesi için lipo deneriz
-          lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box || cp bin/arm64/mp4box out/mp4box
-          
+          lipo -create bin/arm64/mp4box bin/x86_64/mp4box -output out/mp4box
           chmod +x out/*
 
       - name: Verify Architectures
@@ -58,10 +59,14 @@ jobs:
           cd out
           zip -r ../fusion-universal-bins.zip .
 
-      - name: Release
+      - name: Release Assets (Always run on manual or tag)
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           files: fusion-universal-bins.zip
+          tag_name: ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
+          name: Fusion Universal Binaries
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
